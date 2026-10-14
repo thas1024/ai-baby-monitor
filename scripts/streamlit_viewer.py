@@ -97,6 +97,7 @@ else:
         step=1,
     )
     if st.button(t("fetch_logs_button"), type="primary"):
-        logs = fetch_logs(redis_handler, selected_config.name, num_logs=num_logs)[::-1]
+        # render_logs shows newest-first itself; fetch_logs returns chronological.
+        logs = fetch_logs(redis_handler, selected_config.name, num_logs=num_logs)
         with st.container(height=800):
             render_logs(logs)

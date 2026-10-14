@@ -49,7 +49,7 @@ Three per-room Redis streams, all built by `keys.room_keys(room_name)` (`src/ai_
 
 - `ai_baby_monitor:{room}:realtime` — last 3 frames, `approximate=False`; read by the Streamlit viewer for the live image.
 - `ai_baby_monitor:{room}:subsampled` — every Nth frame (`subsample_rate`), capped at `subsampled_stream_maxlen`; read by the watcher in batches of `num_frames_to_process`.
-- `ai_baby_monitor:{room}:logs` — watcher results (`should_alert`, `awareness_level`, `reasoning`) and error records (`{timestamp, error}`); read by the viewer. `render_logs` handles both shapes.
+- `ai_baby_monitor:{room}:logs` — watcher results (`should_alert`, `awareness_level`, `reasoning`, `night_mode`) plus a representative-frame **thumbnail** (`frame`, binary JPEG) and error records (`{timestamp, error}`); read by the viewer. `render_logs` handles both shapes and shows a timeline. `deserialize_log` keeps `frame` as bytes (text fields are decoded).
 
 Data flow: `CameraStream` grabs a frame → JPEG-encodes it into a `Frame(frame_data: np.ndarray, timestamp, frame_idx)` → `RedisStreamHandler` stores raw bytes → the watcher deserializes and sends each frame as its own `image_url` content part (`data:image/jpeg;base64,...`) alongside the instructions text.
 
@@ -92,7 +92,7 @@ User-facing text is bilingual, selected by `APP_LANG` (`zh` default, or `en`).
 - `configs/*.yaml` sample instructions are Chinese; the streamlit mode options are stored as stable keys (`realtime`/`historic`) and translated for display via `st.radio(format_func=...)`.
 - structlog log messages and code identifiers stay English on purpose.
 
-Streamlit reads frames/logs back and renders them; the viewer loop (`while True` in `scripts/streamlit_viewer.py`) polls Redis for the newest frame and log each rerun.
+Streamlit reads frames/logs back and renders them. The historic-logs view is a **timeline (newest first)**: every entry is a `st.expander` carrying its representative photo (`imaging.encode_thumbnail` stores a downscaled JPEG in the log entry); anomalous entries (alert or MEDIUM/HIGH awareness) default to expanded, normal ones to collapsed. The viewer loop (`while True` in `scripts/streamlit_viewer.py`) polls Redis for the newest frame and log each rerun.
 
 ### Watcher
 
@@ -124,7 +124,8 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 ## Gotchas
 
 - `pyproject.toml` lists every module imported directly (`numpy`, `pillow`, `pydantic`, `pyyaml`, `openai`) — these used to arrive transitively via `vllm`, which is no longer a dependency. Adding a new direct import means adding it here too, then `uv lock`.
-- `Frame.frame_data` holds JPEG bytes as a `np.ndarray` (from `cv2.imencode`), not a decoded image, until the viewer re-opens it with PIL. Don't decode it in the transport path.
+- `Frame.frame_data` holds JPEG bytes as a `np.ndarray` (from `cv2.imencode`), not a decoded image, until the viewer re-opens it with PIL. Don't decode it in the transport path. The watcher additionally stores a small thumbnail of the last window frame in each log entry (`imaging.encode_thumbnail`) for the UI timeline.
+- `RedisStreamHandler.deserialize_log` keeps binary fields (`frame`) as bytes and only decodes text fields — decoding image bytes as UTF-8 would corrupt/raise.
 - `RedisStreamHandler` takes `redis_password` (`None` = no auth); all three entry points read it from `REDIS_PASSWORD`.
 - `RedisStreamHandler.get_latest_entries` uses `xrevrange` (newest-first) and reverses the result to return chronological order — the reversal is intentional and asserted by tests.
 - `run_watcher.py` exits(1) if `instructions` is empty or if any `LLM_*` env var is missing.

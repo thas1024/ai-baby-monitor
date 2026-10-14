@@ -105,7 +105,7 @@ instructions:          # natural‑language rules for the nanny model
 
 1. **`stream_to_redis.py`** captures frames and pushes them to Redis (short *realtime* & long *subsampled* frames queues).
 2. **`run_watcher.py`** waits for the picture to change (motion gating) or a heartbeat, then sends only the changed frames — each time‑annotated — to the OpenAI‑compatible endpoint, receives structured JSON, writes logs & plays a beep if it receives `should_alert = True`.
-3. **Streamlit** live‑updates the latest frame + llm logs.
+3. **Streamlit** live‑updates the latest frame + llm logs; the **Historic logs** tab is a timeline (newest first) where every entry carries a photo of that moment — alerts expand by default, normal entries stay collapsed.
 
 ---
 

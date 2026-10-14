@@ -83,42 +83,69 @@ def fetch_logs(
     for log_id, log_data in logs:
         log_data = redis_handler.deserialize_log(log_data)
         log_data["timestamp"] = dt.datetime.fromtimestamp(float(log_data["timestamp"]))
+
+        # Turn the stored thumbnail bytes into a displayable image.
+        frame_bytes = log_data.get("frame")
+        if isinstance(frame_bytes, (bytes, bytearray)) and frame_bytes:
+            try:
+                log_data["image"] = Image.open(io.BytesIO(frame_bytes))
+            except Exception:
+                log_data["image"] = None
+        else:
+            log_data["image"] = None
+
         new_logs.append(log_data)
 
     return new_logs
 
 
+def _is_anomalous(log: dict) -> bool:
+    """Whether a verdict is worth expanding by default in the timeline."""
+    if "error" in log and "should_alert" not in log:
+        return True
+    return str(log.get("should_alert")) == "1" or log.get("awareness_level") in (
+        "MEDIUM",
+        "HIGH",
+    )
+
+
+def _colored_level(level: str) -> str:
+    label = t(f"awareness_{level}")
+    if level == "LOW":
+        return f":green[{label}]"
+    if level == "MEDIUM":
+        return f":yellow[{label}]"
+    return f":red[{label}]"
+
+
 def render_logs(logs: list[dict]):
-    for log in reversed(logs):
+    """Render the logs as a timeline, newest first, each entry collapsible.
+
+    Every entry carries its representative photo; the only difference is that
+    anomalous entries (an alert, or MEDIUM/HIGH awareness) default to expanded,
+    while normal ones default to collapsed.
+    """
+    for log in reversed(logs):  # newest first
         timestamp = log.get("timestamp")
 
-        # The watcher writes two kinds of records to the logs stream: normal
-        # verdicts (should_alert / awareness_level / reasoning) and error records
-        # ({timestamp, error}). Both must render without raising.
+        # Error records: {timestamp, error} — no verdict fields, no photo.
         if "error" in log and "should_alert" not in log:
-            with st.chat_message("ai", avatar="⚠️"):
-                st.write(t("timestamp", ts=timestamp))
+            with st.expander(f"⚠️ {timestamp}", expanded=False):
                 st.write(t("error", error=log["error"]))
-                st.divider()
             continue
 
-        alert_status = "🚨" if str(log.get("should_alert")) == "1" else "🟢"
+        alert_icon = "🚨" if str(log.get("should_alert")) == "1" else "🟢"
         level = log.get("awareness_level", "UNKNOWN")
-        level_label = t(f"awareness_{level}")
-        if level == "LOW":
-            level_label = f":green[{level_label}]"
-        elif level == "MEDIUM":
-            level_label = f":yellow[{level_label}]"
-        else:
-            level_label = f":red[{level_label}]"
-        reasoning = log.get("reasoning", "")
-        with st.chat_message("ai"):
-            st.write(t("timestamp", ts=timestamp))
-            st.write(t("alert_status", status=alert_status))
-            st.write(t("awareness_level", level=level_label))
-            if "night_mode" in log:
-                st.write(
-                    t("night_mode", value=t("yes" if str(log["night_mode"]) == "1" else "no"))
-                )
-            st.write(t("reasoning", reasoning=reasoning))
-            st.divider()
+        header = f"{alert_icon} {timestamp} · {_colored_level(level)}"
+        if str(log.get("night_mode")) == "1":
+            header += f" · 🌙 {t('night_mode_short')}"
+
+        with st.expander(header, expanded=_is_anomalous(log)):
+            image = log.get("image")
+            if image is not None:
+                st.image(image, use_container_width=True)
+            else:
+                st.caption(t("no_photo"))
+            if log.get("frame_timestamp"):
+                st.caption(t("frame_time", ts=log["frame_timestamp"]))
+            st.write(t("reasoning", reasoning=log.get("reasoning", "")))

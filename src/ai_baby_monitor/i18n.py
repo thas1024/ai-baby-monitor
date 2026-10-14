@@ -49,8 +49,12 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "reasoning": {"zh": "判断理由： {reasoning}", "en": "Reasoning: {reasoning}"},
     "error": {"zh": "错误： {error}", "en": "Error: {error}"},
     "night_mode": {"zh": "夜视模式： {value}", "en": "Night vision: {value}"},
+    "night_mode_short": {"zh": "夜视", "en": "night vision"},
     "yes": {"zh": "是", "en": "yes"},
     "no": {"zh": "否", "en": "no"},
+    "photo": {"zh": "现场照片", "en": "Photo"},
+    "no_photo": {"zh": "（此条无照片）", "en": "(no photo for this entry)"},
+    "frame_time": {"zh": "画面时间： {ts}", "en": "Frame time: {ts}"},
     # Awareness level display labels (stored values stay LOW/MEDIUM/HIGH)
     "awareness_LOW": {"zh": "低", "en": "LOW"},
     "awareness_MEDIUM": {"zh": "中", "en": "MEDIUM"},

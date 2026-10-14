@@ -211,3 +211,18 @@ def test_get_latest_logs(
         (b"log_id_2", {b"timestamp": b"ts2", b"message": b"Log 2"}),
     ]
     assert logs == expected_logs_final_order
+
+
+def test_deserialize_log_keeps_binary_frame_and_decodes_text():
+    log_data = {
+        b"timestamp": b"123.45",
+        b"should_alert": b"1",
+        b"reasoning": b"baby climbing",
+        b"frame": b"\xff\xd8\xff\xe0\x00\x10JFIF",  # JPEG magic, not valid UTF-8
+    }
+    out = RedisStreamHandler.deserialize_log(log_data)
+    assert out["timestamp"] == "123.45"
+    assert out["should_alert"] == "1"
+    assert out["reasoning"] == "baby climbing"
+    # Binary field preserved as bytes (not decoded/corrupted).
+    assert out["frame"] == b"\xff\xd8\xff\xe0\x00\x10JFIF"

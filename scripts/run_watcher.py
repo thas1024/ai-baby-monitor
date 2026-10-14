@@ -9,6 +9,7 @@ from playsound3 import playsound
 
 from ai_baby_monitor.alerts import is_alert_worthy, should_emit_alert
 from ai_baby_monitor.config import load_room_config_file
+from ai_baby_monitor.imaging import encode_thumbnail
 from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.motion import frame_diff_score, should_analyze
 from ai_baby_monitor.stream import RedisStreamHandler
@@ -235,7 +236,13 @@ def run_watcher(
                     "awareness_level": awareness,
                     "reasoning": result["reasoning"],
                     "night_mode": int(night_mode),
+                    # Representative frame (last of the window) for human review in
+                    # the timeline; stored as a small thumbnail to bound stream size.
+                    "frame_timestamp": frames[-1].timestamp.isoformat(),
                 }
+                thumbnail = encode_thumbnail(frames[-1].frame_data)
+                if thumbnail is not None:
+                    log_data["frame"] = thumbnail
                 redis_handler.add_logs(logs_key, log_data)
 
                 # Advance the baseline only on success.
