@@ -82,14 +82,16 @@ if selected_mode == "realtime":
                     st.caption(t("no_photo"))
 
         with log_placeholder.container(height=350):
-            with st.expander(t("llm_logs"), expanded=True, icon="🤖"):
-                logs = fetch_logs(
-                    redis_handler,
-                    selected_config.name,
-                    num_logs=1,
-                )
+            # No outer expander here: render_logs opens its own expander per log
+            # entry, and Streamlit forbids nesting expanders.
+            st.subheader(t("llm_logs"), divider=False)
+            logs = fetch_logs(
+                redis_handler,
+                selected_config.name,
+                num_logs=1,
+            )
 
-                render_logs(logs)
+            render_logs(logs)
 
 else:
     st.title(t("logs_viewer_title"))
