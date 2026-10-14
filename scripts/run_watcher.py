@@ -7,6 +7,7 @@ import structlog
 from dotenv import load_dotenv
 from playsound3 import playsound
 
+from ai_baby_monitor.alerts import should_emit_alert
 from ai_baby_monitor.config import load_room_config_file
 from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.motion import frame_diff_score, should_analyze
@@ -69,10 +70,11 @@ def run_watcher(
     num_frames_to_process: int,
     api_mode: str = "chat",
     redis_password: str | None = None,
-    motion_threshold: float = 3.0,
+    motion_metric: str = "mean",
+    motion_threshold: float | None = None,
     min_interval_seconds: float = 10.0,
     max_interval_seconds: float = 30.0,
-    subsampled_stream_maxlen: int = 64,
+    subsampled_stream_maxlen: int = 128,
 ):
     """
     Run the Watcher continuously to monitor frames from Redis stream.
@@ -112,6 +114,7 @@ def run_watcher(
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
+        motion_metric=motion_metric,
         motion_threshold=motion_threshold,
     )
 
@@ -124,6 +127,7 @@ def run_watcher(
         video_queue_key=subsampled_key,
         logs_queue_key=logs_key,
         motion_threshold=motion_threshold,
+        motion_metric=motion_metric,
         min_interval_seconds=min_interval_seconds,
         max_interval_seconds=max_interval_seconds,
     )
@@ -135,6 +139,10 @@ def run_watcher(
     last_analyzed_frame_data = None
     last_analyzed_ts = None
     last_call_monotonic = None
+
+    # Recent alert verdicts, for debouncing the beep (a single flip is ignored).
+    recent_verdicts: list[tuple[bool, float]] = []
+    alert_gap_seconds = min(1800.0, max(300.0, max_interval_seconds * 3))
 
     try:
         while True:
@@ -157,6 +165,7 @@ def run_watcher(
                 motion_threshold,
                 min_interval_seconds,
                 max_interval_seconds,
+                motion_metric,
             ):
                 time.sleep(WATCHER_POLL_SECONDS)
                 continue
@@ -184,7 +193,9 @@ def run_watcher(
                 frames = [newest_frame]
 
             motion_score = (
-                frame_diff_score(last_analyzed_frame_data, newest_frame.frame_data)
+                frame_diff_score(
+                    last_analyzed_frame_data, newest_frame.frame_data, motion_metric
+                )
                 if last_analyzed_frame_data is not None
                 else None
             )
@@ -227,7 +238,13 @@ def run_watcher(
                 last_analyzed_frame_data = bytes(frames[-1].frame_data)
                 last_analyzed_ts = frames[-1].timestamp
 
-                if result["should_alert"]:
+                # Debounce the alert action: only beep once a violation is
+                # confirmed by two consecutive positive verdicts (leading edge).
+                recent_verdicts.append((bool(result["should_alert"]), time.monotonic()))
+                del recent_verdicts[:-5]
+                if result["should_alert"] and should_emit_alert(
+                    recent_verdicts, alert_gap_seconds
+                ):
                     _play_alert()
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -313,6 +330,7 @@ if __name__ == "__main__":
             num_frames_to_process=num_frames_to_process,
             api_mode=LLM_API_MODE,
             redis_password=REDIS_PASSWORD,
+            motion_metric=room_config.motion_metric,
             motion_threshold=room_config.motion_threshold,
             min_interval_seconds=room_config.min_interval_seconds,
             max_interval_seconds=room_config.max_interval_seconds,

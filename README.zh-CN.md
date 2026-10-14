@@ -88,11 +88,11 @@ instructions:            # 给「保姆」大模型看的自然语言规则
 
 * **多房间**？编辑 `docker-compose.yml`，为每个房间各加一个 `stream_to_redis` 和一个 `watcher` 服务，并把新的房间配置传给 Streamlit 面板。
 * **更换模型 / 后端**？在 `.env` 里设置 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL_NAME`，指向任意 OpenAI 协议的视觉端点。设 `LLM_API_MODE=responses` 走 OpenAI Responses API，默认走 Chat Completions。想回退到本地推理，执行 `docker compose --profile local up -d`，并把 `LLM_BASE_URL=http://localhost:8000/v1`。
-* **降低频率 / 省 token**？watcher 只在画面**真正变化**时才调用模型，另加心跳兜底。每个房间可调（放在 `camera:` 下）：`motion_threshold`（判定"变化"的平均像素差，`0` 关闭门控、每帧都发）、`min_interval_seconds`（最小间隔）、`max_interval_seconds`（心跳上限）。发生变化的帧会带时间标注发送（`[帧N @ <时间>]`）；未变化的连续帧只发一条文字说明、不带图，因此单次请求的图片数通常远小于 `num_frames_to_process`。详见下节。
+* **降低频率 / 省 token**？watcher 只在画面**真正变化**时才调用模型，另加心跳兜底。每个房间可调（放在 `camera:` 下）：`motion_metric`（`mean` / `grid_max` / `changed_fraction`）、`motion_threshold`（省略则用该指标的默认值，`0` 关闭门控、每帧都发）、`min_interval_seconds`（最小间隔）、`max_interval_seconds`（心跳上限）。发生变化的帧会带时间标注发送（`[帧N @ <时间>]`）；未变化的连续帧只发一条文字说明、不带图，因此单次请求的图片数通常远小于 `num_frames_to_process`。告警蜂鸣做了去抖，只在违规被确认时响一次。详见下节。
 
 ### 运动门控与调参
 
-`ai_baby_monitor/motion.py` 决定**是否**调用模型（把最新帧与"上次分析过的帧"比较，有变化或到心跳就调）以及**发送哪些帧**（只发变化了的帧，未变化的连续段折叠成一条 `[跳过 N 帧：… （画面无明显变化）]` 说明）。每次分析都会记录 `motion_score`；`motion_threshold` **因摄像头而异**——在空房间里关掉门控跑一会儿，把阈值设在空闲噪声之上一点。作为安全监控**宁可误报不可漏报**：拿不准就把阈值调低，用 `min_interval_seconds` 控成本。`subsampled_stream_maxlen` 必须覆盖 `max_interval_seconds` 对应的帧数（否则 watcher 会打 warning）。
+`ai_baby_monitor/motion.py` 决定**是否**调用模型（把最新帧与"上次分析过的帧"比较，有变化或到心跳就调）以及**发送哪些帧**（只发变化了的帧，未变化的连续段折叠成一条 `[跳过 N 帧：… （画面无明显变化）]` 说明）。`motion_metric` 选择比较方式：`mean`（整帧均值）、`grid_max`（取最"忙"的网格，能抓到整帧平均会漏掉的局部小动作）、`changed_fraction`（变化像素占比，抗噪声）。每次分析都会记录 `motion_score`；`motion_threshold` **因摄像头而异**——在空房间里关掉门控跑一会儿，把阈值设在空闲噪声之上一点。作为安全监控**宁可误报不可漏报**：拿不准就把阈值调低，用 `min_interval_seconds` 控成本。`subsampled_stream_maxlen` 必须覆盖 `max_interval_seconds` 对应的帧数（否则 watcher 会打 warning）。告警**蜂鸣**做了去抖（`alerts.py`）：连续两次判定都告警才响一次，不会每帧翻转都响；所有判定仍然全部写入日志。
 * **界面语言**？设 `APP_LANG=zh`（默认）或 `en`，同时决定界面文案和模型输出的语言。
 
 ---

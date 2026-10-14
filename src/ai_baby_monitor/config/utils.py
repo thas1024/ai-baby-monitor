@@ -36,9 +36,11 @@ class RoomConfig:
     frame_height: int = 360
     subsample_rate: int = 4
     num_frames_to_process: int = 16
-    # Motion gating / request throttling (see docs and motion.py). A threshold of
-    # 0 disables gating and intra-window compression (send every frame, always call).
-    motion_threshold: float = 3.0
+    # Motion gating / request throttling (see docs and motion.py).
+    # motion_metric selects how frame difference is scored; motion_threshold=None
+    # uses that metric's default, and an explicit 0 disables gating entirely.
+    motion_metric: str = "mean"
+    motion_threshold: float | None = None
     min_interval_seconds: float = 10.0
     max_interval_seconds: float = 30.0
 
@@ -64,7 +66,7 @@ def load_room_config_file(config_path: str | Path) -> RoomConfig:
             
             # Optional fields (only include if specified in YAML)
             **{k: data["camera"][k] for k in
-               ["subsampled_stream_maxlen", "frame_width", "frame_height", "subsample_rate", "num_frames_to_process", "motion_threshold", "min_interval_seconds", "max_interval_seconds"]
+               ["subsampled_stream_maxlen", "frame_width", "frame_height", "subsample_rate", "num_frames_to_process", "motion_metric", "motion_threshold", "min_interval_seconds", "max_interval_seconds"]
                if k in data["camera"]}
         }
         

@@ -10,6 +10,7 @@ from ai_baby_monitor.motion import (
     build_timeline,
     frame_diff_score,
     frames_are_similar,
+    resolve_threshold,
     should_analyze,
 )
 from ai_baby_monitor.stream import Frame
@@ -137,3 +138,60 @@ def test_should_analyze_no_motion_before_heartbeat_skips():
     jpeg = _jpeg(1)
     # no motion, 15s elapsed (>= min 10, < max 30) -> skip
     assert should_analyze(jpeg, jpeg.copy(), 15.0, 0.0, 3.0, 10.0, 30.0) is False
+
+
+# --- metrics (F1) ---
+
+def _solid(value: int, shape=(90, 160, 3)) -> np.ndarray:
+    ok, buffer = cv2.imencode(".jpg", np.full(shape, value, np.uint8))
+    assert ok
+    return buffer
+
+
+def _with_block(value: int, block_value: int, y: int = 40, x: int = 80, size: int = 20) -> np.ndarray:
+    image = np.full((90, 160, 3), value, np.uint8)
+    image[y:y + size, x:x + size] = block_value
+    ok, buffer = cv2.imencode(".jpg", image)
+    assert ok
+    return buffer
+
+
+def test_grid_max_detects_localized_change_mean_misses():
+    base = _solid(100)
+    local = _with_block(100, 220, size=12)
+    mean_score = frame_diff_score(base, local, metric="mean")
+    grid_score = frame_diff_score(base, local, metric="grid_max")
+    # A small localized change barely moves the whole-frame mean, but dominates one cell.
+    assert mean_score < 3.0
+    assert grid_score > 10.0
+
+
+def test_changed_fraction_ignores_uniform_noise():
+    rng = np.random.default_rng(0)
+    base = np.full((90, 160, 3), 100, np.uint8)
+    noisy = np.clip(base.astype(int) + rng.integers(-3, 4, base.shape), 0, 255).astype(np.uint8)
+    ok, noisy_jpeg = cv2.imencode(".jpg", noisy)
+    assert ok
+    ok, base_jpeg = cv2.imencode(".jpg", base)
+    assert ok
+    # Noise below the floor -> tiny changed fraction -> "similar" at 0.01.
+    assert frame_diff_score(base_jpeg, noisy_jpeg, metric="changed_fraction") < 0.01
+
+
+def test_changed_fraction_detects_block():
+    base = _solid(100)
+    local = _with_block(100, 220)
+    assert frame_diff_score(base, local, metric="changed_fraction") > 0.01
+
+
+def test_resolve_threshold_uses_metric_default():
+    assert resolve_threshold("mean", None) == 3.0
+    assert resolve_threshold("grid_max", None) == 6.0
+    assert resolve_threshold("changed_fraction", None) == 0.01
+    assert resolve_threshold("mean", 9.0) == 9.0
+
+
+def test_unknown_metric_falls_back_to_mean():
+    base = _solid(100)
+    other = _solid(200)
+    assert frame_diff_score(base, other, metric="bogus") == frame_diff_score(base, other, metric="mean")

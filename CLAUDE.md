@@ -70,8 +70,8 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 
 `src/ai_baby_monitor/motion.py` (pure functions, no Redis/config) controls how often the model is called and how many images each request carries:
 
-- `frame_diff_score` / `frames_are_similar` — difference between two JPEG frames on a pinned pipeline (grayscale → 160x90 → Gaussian blur → mean abs diff). Byte-identical → 0.0; undecodable → `inf` (treated as "changed", never raises). `threshold <= 0` disables comparison.
-- `build_timeline(frames, threshold)` — the first frame is always an image anchor; each later frame is compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A window always yields ≥1 image.
+- `frame_diff_score` / `frames_are_similar` — difference between two JPEG frames on a pinned pipeline (grayscale → 160x90 → Gaussian blur). Byte-identical → 0.0; undecodable → `inf` (treated as "changed", never raises). `threshold <= 0` disables comparison. Three metrics via `motion_metric`: `mean` (whole-frame mean abs diff), `grid_max` (max per-cell mean — sensitive to small localized motion), `changed_fraction` (share of pixels above a noise floor). Their scales differ, so `resolve_threshold` maps `motion_threshold=None` to a per-metric default; never reuse a value across metrics.
+- `build_timeline(frames, threshold, metric)` — the first frame is always an image anchor; each later frame is compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A window always yields ≥1 image.
 - `should_analyze(...)` — the cycle gate: call when the newest frame differs from the last analyzed frame, or when the heartbeat (`max_interval_seconds`) elapses, floored by `min_interval_seconds`. `threshold <= 0` or no baseline → always call.
 
 `Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation; skipped runs become a text note with no image). `_request` maps parts to chat/responses content. `run_watcher.py` holds the gate state:
@@ -79,6 +79,8 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 - baseline = the last frame of the last **successful** window (a failed call is retried next cycle);
 - interval timing uses `time.monotonic()`, not frame timestamps;
 - when the gate opens it fetches frames **since the last analyzed window** (`RedisStreamHandler.get_frames_since`) so no gap is skipped — capped by `subsampled_stream_maxlen`, and it warns if that cap truncates the gap.
+
+The alert **action** is debounced (`src/ai_baby_monitor/alerts.py` `should_emit_alert`): the beep only fires on the leading edge of a violation confirmed by two consecutive positive verdicts within `min(1800, max(300, max_interval_seconds*3))` seconds. Every verdict is still written to `:logs` — only the beep is debounced.
 
 ### Localization (i18n)
 

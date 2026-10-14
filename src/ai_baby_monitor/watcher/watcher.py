@@ -54,7 +54,8 @@ class Watcher:
         base_url: str = "https://api.openai.com/v1",
         api_key: str = "EMPTY",
         api_mode: str = "chat",
-        motion_threshold: float = 0.0,
+        motion_metric: str = "mean",
+        motion_threshold: float | None = None,
     ):
         """
         Initialize the Watcher with instructions and OpenAI-compatible endpoint details.
@@ -69,8 +70,11 @@ class Watcher:
                 (``/v1/responses``). Chat Completions is near-universally supported
                 by compatible endpoints, so it is the default.
             motion_threshold: Mean pixel-difference above which two frames count as
-                changed. Non-positive disables intra-window compression (every frame
-                is sent as an image).
+                changed. ``None`` uses the metric's default; ``0`` disables
+                intra-window compression (every frame is sent as an image).
+            motion_metric: How frame difference is scored — "mean" (whole-frame),
+                "grid_max" (busiest cell, sensitive to small motion), or
+                "changed_fraction" (share of changed pixels). See ``motion.py``.
         """
         if api_mode not in ("chat", "responses"):
             raise ValueError(
@@ -79,6 +83,7 @@ class Watcher:
 
         self.instructions_prompt = get_instructions_prompt(instructions)
         self.json_schema = self._make_strict(WatcherResponse.model_json_schema())
+        self.motion_metric = motion_metric
         self.motion_threshold = motion_threshold
 
         self.model_name = model_name
@@ -106,6 +111,7 @@ class Watcher:
             model_name=model_name,
             base_url=base_url,
             api_mode=api_mode,
+            motion_metric=motion_metric,
             motion_threshold=motion_threshold,
             instructions=instructions,
         )
@@ -142,7 +148,7 @@ class Watcher:
         place what it sees on a timeline.
         """
         parts: list[ContentPart] = []
-        for item in build_timeline(frames, self.motion_threshold):
+        for item in build_timeline(frames, self.motion_threshold, self.motion_metric):
             if isinstance(item, ImageItem):
                 parts.append(
                     TextPart(format_frame_annotation(item.index, item.frame.timestamp))
