@@ -50,6 +50,9 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Number of latest logs to fetch",
     },
     "fetch_logs_button": {"zh": "查询日志", "en": "Fetch logs"},
+    "filter_level": {"zh": "按关注等级过滤", "en": "Filter by awareness level"},
+    "filter_alerts_only": {"zh": "只看告警", "en": "Alerts only"},
+    "no_logs_match": {"zh": "没有符合条件的日志。", "en": "No logs match the filter."},
     # Log records
     "alert_status": {"zh": "告警状态： {status}", "en": "Alert status: {status}"},
     "awareness_level": {"zh": "关注等级： {level}", "en": "Awareness level: {level}"},

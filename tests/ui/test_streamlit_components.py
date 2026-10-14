@@ -7,6 +7,8 @@ def _patch_st():
     patcher = patch.object(sc, "st")
     mock_st = patcher.start()
     mock_st.expander.return_value = MagicMock()
+    # The timeline lays each entry out in a [node, body] column pair.
+    mock_st.columns.return_value = [MagicMock(), MagicMock()]
     return patcher, mock_st
 
 
@@ -142,3 +144,77 @@ def test_localize_uses_app_tz(monkeypatch):
 def test_localize_bad_tz_falls_back(monkeypatch):
     monkeypatch.setenv("APP_TZ", "Not/AZone")
     assert sc._display_tz() is None
+
+
+# --- timeline node / colors ---
+
+def test_medium_level_uses_orange_not_yellow():
+    # Streamlit has no ":yellow[...]" — must be a supported color name.
+    assert ":orange[" in sc._colored_level("MEDIUM")
+    assert ":yellow[" not in sc._colored_level("MEDIUM")
+
+
+def test_node_html_colors_per_level():
+    assert sc._NODE_COLORS["LOW"] in sc._timeline_node(sc._NODE_COLORS["LOW"], False)
+    med = sc._timeline_node(sc._NODE_COLORS["MEDIUM"], False)
+    assert "#f59e0b" in med
+    strong = sc._timeline_node(sc._NODE_COLORS["HIGH"], True)
+    assert "tl-strong" in strong
+
+
+def test_render_logs_draws_a_node_per_entry():
+    patcher, mock_st = _patch_st()
+    try:
+        sc.render_logs(
+            [
+                {"timestamp": "a", "should_alert": "0", "awareness_level": "LOW"},
+                {"timestamp": "b", "should_alert": "1", "awareness_level": "HIGH"},
+            ]
+        )
+    finally:
+        patcher.stop()
+    # one node markdown per entry (the CSS block also mentions the class)
+    node_calls = [
+        c for c in mock_st.markdown.call_args_list if 'class="tl-node"' in str(c.args[0])
+    ]
+    assert len(node_calls) == 2
+
+
+# --- filtering ---
+
+def test_log_level_and_is_alert():
+    assert sc.log_level({"should_alert": "1", "awareness_level": "HIGH"}) == "HIGH"
+    assert sc.log_level({"timestamp": "t", "error": "x"}) is None
+    assert sc.is_alert({"should_alert": "1"}) is True
+    assert sc.is_alert({"should_alert": "0"}) is False
+
+
+def test_filter_logs_by_level():
+    logs = [
+        {"should_alert": "0", "awareness_level": "LOW"},
+        {"should_alert": "1", "awareness_level": "HIGH"},
+        {"should_alert": "0", "awareness_level": "MEDIUM"},
+    ]
+    assert len(sc.filter_logs(logs, ["LOW", "MEDIUM", "HIGH"])) == 3
+    assert sc.filter_logs(logs, ["HIGH"]) == [logs[1]]
+    assert len(sc.filter_logs(logs, [])) == 3  # empty = all
+
+
+def test_filter_logs_alerts_only_excludes_health_records():
+    logs = [
+        {"should_alert": "1", "awareness_level": "HIGH"},
+        {"should_alert": "0", "awareness_level": "LOW"},
+        {"timestamp": "t", "error": "no live video"},
+    ]
+    out = sc.filter_logs(logs, [], alerts_only=True)
+    assert out == [logs[0]]
+
+
+def test_filter_logs_level_keeps_health_records_when_not_alerts_only():
+    logs = [
+        {"timestamp": "t", "error": "no live video"},
+        {"should_alert": "0", "awareness_level": "LOW"},
+    ]
+    out = sc.filter_logs(logs, ["HIGH"])
+    # health record has no level -> dropped by a level filter; LOW not selected
+    assert out == []

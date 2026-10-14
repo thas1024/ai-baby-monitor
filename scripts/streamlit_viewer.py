@@ -10,6 +10,7 @@ from ai_baby_monitor.i18n import t
 from ai_baby_monitor.ui import (
     display_sidebar,
     fetch_logs,
+    filter_logs,
     get_cached_redis_handler,
     get_camera_images,
     render_logs,
@@ -102,8 +103,22 @@ else:
         value=100,
         step=1,
     )
+
+    level_names = ["LOW", "MEDIUM", "HIGH"]
+    selected_levels = st.multiselect(
+        t("filter_level"),
+        options=level_names,
+        default=level_names,
+        format_func=lambda lvl: t(f"awareness_{lvl}"),
+    )
+    alerts_only = st.checkbox(t("filter_alerts_only"), value=False)
+
     if st.button(t("fetch_logs_button"), type="primary"):
         # render_logs shows newest-first itself; fetch_logs returns chronological.
         logs = fetch_logs(redis_handler, selected_config.name, num_logs=num_logs)
+        logs = filter_logs(logs, selected_levels, alerts_only)
         with st.container(height=800):
-            render_logs(logs)
+            if logs:
+                render_logs(logs)
+            else:
+                st.info(t("no_logs_match"))
