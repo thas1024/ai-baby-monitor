@@ -12,6 +12,23 @@ stream; see ``run_watcher.py``.
 Verdict = tuple[bool, float]  # (should_alert, monotonic timestamp)
 
 
+def is_alert_worthy(
+    should_alert: bool, night_mode: bool, awareness_level: str, high_level: str = "HIGH"
+) -> bool:
+    """Whether a verdict is eligible to raise an alert action at all.
+
+    In night-vision mode the monitor is deliberately less sensitive (grayscale/IR
+    frames are noisier), so only a HIGH-confidence violation qualifies. In color
+    mode any positive verdict qualifies. This gates the *action*; the verdict is
+    logged regardless.
+    """
+    if not should_alert:
+        return False
+    if night_mode and awareness_level != high_level:
+        return False
+    return True
+
+
 def should_emit_alert(verdicts: list[Verdict], max_gap_seconds: float) -> bool:
     """Whether the just-recorded verdict confirms a *new* alert.
 

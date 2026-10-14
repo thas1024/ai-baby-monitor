@@ -7,6 +7,7 @@ camera:
   # gating and per-frame compression entirely (send every frame, call every cycle).
   # motion_metric: mean          # mean | grid_max (small-motion sensitive) | changed_fraction
   # motion_threshold: 3.0        # scale depends on metric; omit to use the metric default
+  # night_saturation_threshold: 12.0  # HSV saturation <= this => treat frame as night-vision (grayscale)
   # min_interval_seconds: 10.0   # minimum seconds between model calls
   # max_interval_seconds: 30.0   # heartbeat: analyze at least this often even with no motion
   # subsampled_stream_maxlen: 128 # must cover max_interval (>= fps * max_interval)

@@ -94,6 +94,8 @@ instructions:          # natural‑language rules for the nanny model
 
 `ai_baby_monitor/motion.py` decides *whether* to call the model (compare the newest frame to the last analyzed one; call on change or heartbeat) and *which* frames to send (only the changed ones — unchanged runs become a `[skipped N frames: … (no visible change)]` note). `motion_metric` picks how frames are compared: `mean` (whole‑frame), `grid_max` (busiest cell — catches small localized motion a whole‑frame average misses), or `changed_fraction` (share of changed pixels, noise‑robust). Every analyze logs `motion_score`; `motion_threshold` is camera‑specific — run on an empty room with gating off and set the threshold just above the idle noise. For a safety monitor, prefer false positives (lower threshold) and use `min_interval_seconds` for cost control. `subsampled_stream_maxlen` must cover `max_interval_seconds` at the subsampled frame rate (the watcher warns otherwise). The alert **beep** is debounced (`alerts.py`): it fires once when a violation is confirmed by two consecutive positive verdicts, not on every flip; all verdicts are still logged.
 
+**Night vision (IR).** When the camera switches to infrared, frames are grayscale — normal, not a fault. The prompt tells the model this, night frames are annotated (`· night-vision/IR`), a color↔grayscale switch is noted without re‑sending the whole gray run, and in night mode the monitor is less sensitive: only a `HIGH`‑awareness violation beeps (others are logged). Tune grayscale detection with `night_saturation_threshold` if your camera's "B&W" is slightly tinted.
+
 ---
 
 ## 🏗 Architecture (high level)

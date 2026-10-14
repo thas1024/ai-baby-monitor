@@ -17,6 +17,13 @@ Please generate a structured response in raw JSON format:
 - reasoning (string)
 - recommended_awareness_level (Enum AwarenessLevel; one of: LOW, MEDIUM, HIGH)
 Always respond in English, regardless of the content in the images.
+
+Note on the camera: it may switch to infrared night-vision mode, in which frames
+are grayscale/black-and-white. A grayscale or dark image is normal camera
+behavior — it is NOT a camera fault and is NOT itself a hazard; do not alert just
+because the picture is monochrome, dim, or low on detail. In night-vision
+(grayscale) frames, be more conservative: only set should_alert for a clear,
+high-confidence violation; when unsure, prefer should_alert = false.
         """,
     "zh": """
 你会收到以下监控规则：
@@ -29,6 +36,11 @@ Always respond in English, regardless of the content in the images.
 - reasoning (字符串)
 - recommended_awareness_level (枚举 AwarenessLevel，取值之一：LOW、MEDIUM、HIGH)
 无论画面内容是什么，请始终使用中文回答（reasoning 字段用中文）。
+
+关于摄像头：它可能会切换到红外夜视模式，此时画面是灰度/黑白的。黑白或偏暗
+的画面是相机的正常行为——不是摄像头故障，本身也不是危险信号；不要仅仅因为画面是
+黑白、偏暗或细节少就告警。在夜视（灰度）画面下请更加保守：只在有明确、高置信度的
+违规时才置 should_alert = true，拿不准时宁可不告警。
         """,
 }
 
@@ -51,9 +63,23 @@ _FRAME_ANNOTATION = {
     "en": "[frame {index} @ {ts}]",
     "zh": "[帧{index} @ {ts}]",
 }
+_NIGHT_SUFFIX = {
+    "en": " · night-vision/IR",
+    "zh": " · 夜视/红外模式",
+}
 _SKIPPED_ANNOTATION = {
     "en": "[skipped {count} frames: {start} -> {end} (no visible change)]",
     "zh": "[跳过 {count} 帧：{start} → {end}（画面无明显变化）]",
+}
+_MODE_TRANSITION_ANNOTATION = {
+    "night": {
+        "en": "[switched to night-vision (IR) mode @ {ts}]",
+        "zh": "[切换到夜视（红外）模式 @ {ts}]",
+    },
+    "color": {
+        "en": "[switched back to color mode @ {ts}]",
+        "zh": "[切换到彩色模式 @ {ts}]",
+    },
 }
 
 
@@ -63,12 +89,22 @@ def _format_timestamp(timestamp: dt.datetime) -> str:
 
 
 def format_frame_annotation(
-    index: int, timestamp: dt.datetime, language: str | None = None
+    index: int,
+    timestamp: dt.datetime,
+    night: bool = False,
+    language: str | None = None,
 ) -> str:
-    """Annotation placed before a frame image, e.g. ``[帧1 @ 2026-10-14 12:00:00.000]``."""
+    """Annotation before a frame image, e.g. ``[帧1 @ 2026-10-14 12:00:00.000]``.
+
+    When ``night`` is set, a ``夜视/红外模式`` marker is appended so the model
+    knows the grayscale picture is a night-vision frame, not a fault.
+    """
     language = language or get_language()
     template = _FRAME_ANNOTATION.get(language, _FRAME_ANNOTATION["en"])
-    return template.format(index=index + 1, ts=_format_timestamp(timestamp))
+    text = template.format(index=index + 1, ts=_format_timestamp(timestamp))
+    if night:
+        text += _NIGHT_SUFFIX.get(language, _NIGHT_SUFFIX["en"])
+    return text
 
 
 def format_skipped_annotation(
@@ -85,3 +121,17 @@ def format_skipped_annotation(
         start=_format_timestamp(start_ts),
         end=_format_timestamp(end_ts),
     )
+
+
+def format_mode_transition_annotation(
+    to_night: bool,
+    timestamp: dt.datetime,
+    language: str | None = None,
+) -> str:
+    """Annotation for a color<->night-vision switch (no image is sent)."""
+    language = language or get_language()
+    key = "night" if to_night else "color"
+    template = _MODE_TRANSITION_ANNOTATION[key].get(
+        language, _MODE_TRANSITION_ANNOTATION[key]["en"]
+    )
+    return template.format(ts=_format_timestamp(timestamp))

@@ -116,5 +116,9 @@ def render_logs(logs: list[dict]):
             st.write(t("timestamp", ts=timestamp))
             st.write(t("alert_status", status=alert_status))
             st.write(t("awareness_level", level=level_label))
+            if "night_mode" in log:
+                st.write(
+                    t("night_mode", value=t("yes" if str(log["night_mode"]) == "1" else "no"))
+                )
             st.write(t("reasoning", reasoning=reasoning))
             st.divider()

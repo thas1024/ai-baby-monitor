@@ -1,15 +1,17 @@
 """Frame-motion gating and window timeline compression.
 
 Pure image math — no Redis, config or watcher imports — so it is cheap to unit
-test and reuse. Two jobs:
+test and reuse. Jobs:
 
 * ``frame_diff_score`` / ``frames_are_similar`` — how different two JPEG frames
   are, on a fixed preprocessing pipeline so a threshold value means the same
   thing across runs and cameras.
-* ``build_timeline`` — turn a window of frames into a list of ``ImageItem``
-  (frames worth showing the model) and ``SkippedItem`` (runs of near-identical
-  frames, replaced by a text note). ``should_analyze`` — whether to call the
-  model at all this cycle.
+* ``frame_saturation`` / ``is_night_frame`` — detect infrared/night-vision
+  frames, which are grayscale (saturation ~0).
+* ``build_timeline`` — turn a window of frames into ``ImageItem`` (frames worth
+  showing the model), ``SkippedItem`` (runs of near-identical frames) and
+  ``ModeTransitionItem`` (color<->night-vision switches). ``should_analyze`` —
+  whether to call the model at all this cycle.
 """
 
 import datetime as dt
@@ -34,6 +36,9 @@ _GRID_COLS = 10
 # A pixel counts as "changed" (changed_fraction metric) above this abs-diff, so
 # sensor/JPEG noise below it is ignored.
 _CHANGED_NOISE_FLOOR = 8
+# Mean HSV saturation at or below this counts as a grayscale (night-vision) frame.
+# Real color frames sit well above it; grayscale JPEGs are ~0.
+_NIGHT_SATURATION_THRESHOLD = 12.0
 
 # Supported metrics. Their score scales differ, so a threshold must never be
 # reused across metrics (see ``resolve_threshold``/``DEFAULT_THRESHOLDS``).
@@ -70,6 +75,15 @@ def _decode_small_gray(jpeg_bytes: bytes) -> np.ndarray | None:
         return None
     small = cv2.resize(image, (_PROCESS_WIDTH, _PROCESS_HEIGHT))
     return cv2.GaussianBlur(small, _BLUR_KERNEL, 0)
+
+
+def _decode_small_bgr(jpeg_bytes: bytes) -> np.ndarray | None:
+    """Decode JPEG bytes to a small color image, or None on failure."""
+    array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    image = cv2.imdecode(array, cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    return cv2.resize(image, (_PROCESS_WIDTH, _PROCESS_HEIGHT))
 
 
 def frame_diff_score(prev_frame_data, cur_frame_data, metric: str = "mean") -> float:
@@ -109,6 +123,25 @@ def frame_diff_score(prev_frame_data, cur_frame_data, metric: str = "mean") -> f
     return float(np.mean(diff))
 
 
+def frame_saturation(frame_data) -> float:
+    """Mean HSV saturation (0-255) of a frame.
+
+    Grayscale/infrared frames are ~0; color frames sit well above. Returns
+    ``math.inf`` on decode failure so a broken frame is never mistaken for night.
+    """
+    bgr = _decode_small_bgr(bytes(frame_data))
+    if bgr is None:
+        return math.inf
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return float(np.mean(hsv[:, :, 1]))
+
+
+def is_night_frame(frame_data, threshold: float | None = None) -> bool:
+    """Whether a frame looks grayscale (camera in IR/night-vision mode)."""
+    resolved = _NIGHT_SATURATION_THRESHOLD if threshold is None else threshold
+    return frame_saturation(frame_data) <= resolved
+
+
 def frames_are_similar(
     prev_frame_data, cur_frame_data, threshold: float, metric: str = "mean"
 ) -> bool:
@@ -130,6 +163,7 @@ class ImageItem:
 
     frame: Frame
     index: int
+    night: bool = False
 
 
 @dataclass
@@ -143,25 +177,41 @@ class SkippedItem:
     last_index: int
 
 
-TimelineItem = ImageItem | SkippedItem
+@dataclass
+class ModeTransitionItem:
+    """A color<->night-vision switch, noted to the model without an image."""
+
+    to_night: bool
+    timestamp: dt.datetime
+
+
+TimelineItem = ImageItem | SkippedItem | ModeTransitionItem
 
 
 def build_timeline(
-    frames: list[Frame], threshold: float | None, metric: str = "mean"
+    frames: list[Frame],
+    threshold: float | None,
+    metric: str = "mean",
+    night_threshold: float | None = None,
 ) -> list[TimelineItem]:
-    """Compress ``frames`` into image items plus skipped-run notes.
+    """Compress ``frames`` into image items, skipped-run notes and mode switches.
 
     The first frame is always an image (the anchor). Each later frame is compared
-    against the last frame that was actually included, so slow drift accumulates
-    until it crosses the threshold. A window always yields at least one image.
+    against the last frame that was included, so slow drift accumulates until it
+    crosses the threshold. A color<->night-vision switch resets the anchor to the
+    first frame of the new mode, so a whole run of grayscale frames is compared
+    against each other rather than against the pre-switch color frame (which would
+    otherwise mark every one as "changed"). A window always yields >= 1 image.
     """
     if not frames:
         return []
 
     resolved = resolve_threshold(metric, threshold)
+    modes = [is_night_frame(frame.frame_data, night_threshold) for frame in frames]
 
-    items: list[TimelineItem] = [ImageItem(frame=frames[0], index=0)]
-    anchor = frames[0]
+    items: list[TimelineItem] = [ImageItem(frame=frames[0], index=0, night=modes[0])]
+    anchor_index = 0
+    anchor_mode = modes[0]
 
     skip_start: dt.datetime | None = None
     skip_end: dt.datetime | None = None
@@ -185,7 +235,20 @@ def build_timeline(
 
     for index in range(1, len(frames)):
         frame = frames[index]
-        if frames_are_similar(anchor.frame_data, frame.frame_data, resolved, metric):
+
+        # Day<->night switch: note it and re-anchor, so the new mode's frames are
+        # compared to each other instead of to the previous mode's anchor.
+        if modes[index] != anchor_mode:
+            flush_skip()
+            items.append(ModeTransitionItem(to_night=modes[index], timestamp=frame.timestamp))
+            items.append(ImageItem(frame=frame, index=index, night=modes[index]))
+            anchor_index = index
+            anchor_mode = modes[index]
+            continue
+
+        if frames_are_similar(
+            frames[anchor_index].frame_data, frame.frame_data, resolved, metric
+        ):
             if skip_count == 0:
                 skip_start = frame.timestamp
                 skip_first_index = index
@@ -193,8 +256,8 @@ def build_timeline(
             skip_end = frame.timestamp
         else:
             flush_skip()
-            items.append(ImageItem(frame=frame, index=index))
-            anchor = frame
+            items.append(ImageItem(frame=frame, index=index, night=modes[index]))
+            anchor_index = index
 
     flush_skip()
     return items

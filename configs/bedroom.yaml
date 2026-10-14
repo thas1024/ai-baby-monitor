@@ -5,6 +5,7 @@ camera:
   # Request throttling (optional; defaults shown). motion_threshold=0 disables
   # gating and per-frame compression entirely.
   # motion_threshold: 3.0
+  # night_saturation_threshold: 12.0
   # min_interval_seconds: 10.0
   # max_interval_seconds: 30.0
 

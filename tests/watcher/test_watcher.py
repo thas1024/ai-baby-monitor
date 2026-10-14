@@ -15,45 +15,29 @@ from openai import BadRequestError
 
 def test_get_instructions_prompt_success():
     instructions = ["Instruction 1", "Instruction 2"]
-    expected_prompt = """
-You are given the following instructions:
-* Instruction 1
-* Instruction 2
-
-If the instructions are violated, you should alert the user.
-You should also recommend the awareness level based on the image.
-Please generate a structured response in raw JSON format:
-- should_alert (boolean)
-- reasoning (string)
-- recommended_awareness_level (Enum AwarenessLevel; one of: LOW, MEDIUM, HIGH)
-Always respond in English, regardless of the content in the images.
-        """
-    assert get_instructions_prompt(instructions, language="en") == expected_prompt
+    prompt = get_instructions_prompt(instructions, language="en")
+    assert "* Instruction 1" in prompt
+    assert "* Instruction 2" in prompt
+    assert "should_alert (boolean)" in prompt
+    assert "Always respond in English" in prompt
 
 def test_get_instructions_prompt_empty_list():
     with pytest.raises(ValueError, match="Instructions must be a non-empty list"):
         get_instructions_prompt([])
 
 def test_get_instructions_prompt_single_instruction():
-    instructions = ["Single instruction"]
-    expected_prompt = """
-You are given the following instructions:
-* Single instruction
-
-If the instructions are violated, you should alert the user.
-You should also recommend the awareness level based on the image.
-Please generate a structured response in raw JSON format:
-- should_alert (boolean)
-- reasoning (string)
-- recommended_awareness_level (Enum AwarenessLevel; one of: LOW, MEDIUM, HIGH)
-Always respond in English, regardless of the content in the images.
-        """
-    assert get_instructions_prompt(instructions, language="en") == expected_prompt
+    prompt = get_instructions_prompt(["Single instruction"], language="en")
+    assert "* Single instruction" in prompt
+    assert "Always respond in English" in prompt
 
 def test_get_instructions_prompt_chinese():
     prompt = get_instructions_prompt(["宝宝不能做危险的动作。"], language="zh")
     assert "宝宝不能做危险的动作。" in prompt
     assert "始终使用中文回答" in prompt
+
+def test_prompts_mention_night_vision():
+    assert "night-vision" in get_instructions_prompt(["x"], language="en")
+    assert "夜视" in get_instructions_prompt(["x"], language="zh")
 
 def test_watcher_response_valid():
     data = {
@@ -388,3 +372,17 @@ def test_skipped_annotation_chinese_by_default(monkeypatch):
         3, datetime.datetime(2026, 1, 1, 12, 0, 0), datetime.datetime(2026, 1, 1, 12, 0, 1)
     )
     assert "跳过 3 帧" in text
+
+
+def test_process_frames_reports_night_mode():
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    gray = cv2.imencode(".jpg", (np.random.default_rng(0).random((90, 160)) * 255).astype("uint8"))[1]
+    result = watcher.process_frames([_frame_with(gray)])
+    assert result["night_mode"] is True
+
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    annotation = content[0]["text"]
+    assert "夜视" in annotation or "night-vision" in annotation

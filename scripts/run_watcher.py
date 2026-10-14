@@ -7,7 +7,7 @@ import structlog
 from dotenv import load_dotenv
 from playsound3 import playsound
 
-from ai_baby_monitor.alerts import should_emit_alert
+from ai_baby_monitor.alerts import is_alert_worthy, should_emit_alert
 from ai_baby_monitor.config import load_room_config_file
 from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.motion import frame_diff_score, should_analyze
@@ -72,6 +72,7 @@ def run_watcher(
     redis_password: str | None = None,
     motion_metric: str = "mean",
     motion_threshold: float | None = None,
+    night_saturation_threshold: float | None = None,
     min_interval_seconds: float = 10.0,
     max_interval_seconds: float = 30.0,
     subsampled_stream_maxlen: int = 128,
@@ -116,6 +117,7 @@ def run_watcher(
         api_mode=api_mode,
         motion_metric=motion_metric,
         motion_threshold=motion_threshold,
+        night_saturation_threshold=night_saturation_threshold,
     )
 
     # Subsampled stream key
@@ -226,11 +228,13 @@ def run_watcher(
                 )
 
                 # Stream logs back to Redis
+                night_mode = bool(result.get("night_mode"))
                 log_data = {
                     "timestamp": time.time(),
                     "should_alert": int(result["should_alert"]),
                     "awareness_level": awareness,
                     "reasoning": result["reasoning"],
+                    "night_mode": int(night_mode),
                 }
                 redis_handler.add_logs(logs_key, log_data)
 
@@ -240,11 +244,14 @@ def run_watcher(
 
                 # Debounce the alert action: only beep once a violation is
                 # confirmed by two consecutive positive verdicts (leading edge).
-                recent_verdicts.append((bool(result["should_alert"]), time.monotonic()))
+                # In night-vision mode, be less sensitive: only a HIGH-confidence
+                # violation beeps (LOW/MEDIUM are still logged).
+                alert_worthy = is_alert_worthy(
+                    result["should_alert"], night_mode, awareness
+                )
+                recent_verdicts.append((bool(alert_worthy), time.monotonic()))
                 del recent_verdicts[:-5]
-                if result["should_alert"] and should_emit_alert(
-                    recent_verdicts, alert_gap_seconds
-                ):
+                if alert_worthy and should_emit_alert(recent_verdicts, alert_gap_seconds):
                     _play_alert()
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -332,6 +339,7 @@ if __name__ == "__main__":
             redis_password=REDIS_PASSWORD,
             motion_metric=room_config.motion_metric,
             motion_threshold=room_config.motion_threshold,
+            night_saturation_threshold=room_config.night_saturation_threshold,
             min_interval_seconds=room_config.min_interval_seconds,
             max_interval_seconds=room_config.max_interval_seconds,
             subsampled_stream_maxlen=room_config.subsampled_stream_maxlen,

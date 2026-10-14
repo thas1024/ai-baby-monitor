@@ -71,23 +71,24 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 `src/ai_baby_monitor/motion.py` (pure functions, no Redis/config) controls how often the model is called and how many images each request carries:
 
 - `frame_diff_score` / `frames_are_similar` — difference between two JPEG frames on a pinned pipeline (grayscale → 160x90 → Gaussian blur). Byte-identical → 0.0; undecodable → `inf` (treated as "changed", never raises). `threshold <= 0` disables comparison. Three metrics via `motion_metric`: `mean` (whole-frame mean abs diff), `grid_max` (max per-cell mean — sensitive to small localized motion), `changed_fraction` (share of pixels above a noise floor). Their scales differ, so `resolve_threshold` maps `motion_threshold=None` to a per-metric default; never reuse a value across metrics.
-- `build_timeline(frames, threshold, metric)` — the first frame is always an image anchor; each later frame is compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A window always yields ≥1 image.
+- `frame_saturation` / `is_night_frame` — detect infrared/night-vision frames (grayscale, HSV saturation ~0; threshold `night_saturation_threshold`, default 12.0). Decode failure → not night.
+- `build_timeline(frames, threshold, metric, night_threshold)` — the first frame is always an image anchor; later frames are compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A **color↔night-vision switch** emits a `ModeTransitionItem` and re-anchors to the new mode, so a run of grayscale frames is compared against each other instead of the pre-switch color anchor (which would otherwise mark them all "changed"). `ImageItem.night` marks night frames. A window always yields ≥1 image.
 - `should_analyze(...)` — the cycle gate: call when the newest frame differs from the last analyzed frame, or when the heartbeat (`max_interval_seconds`) elapses, floored by `min_interval_seconds`. `threshold <= 0` or no baseline → always call.
 
-`Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation; skipped runs become a text note with no image). `_request` maps parts to chat/responses content. `run_watcher.py` holds the gate state:
+`Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation — with a `夜视/红外模式` marker when `night`; skipped runs and mode switches become text notes with no image). `_request` maps parts to chat/responses content. `run_watcher.py` holds the gate state:
 
 - baseline = the last frame of the last **successful** window (a failed call is retried next cycle);
 - interval timing uses `time.monotonic()`, not frame timestamps;
 - when the gate opens it fetches frames **since the last analyzed window** (`RedisStreamHandler.get_frames_since`) so no gap is skipped — capped by `subsampled_stream_maxlen`, and it warns if that cap truncates the gap.
 
-The alert **action** is debounced (`src/ai_baby_monitor/alerts.py` `should_emit_alert`): the beep only fires on the leading edge of a violation confirmed by two consecutive positive verdicts within `min(1800, max(300, max_interval_seconds*3))` seconds. Every verdict is still written to `:logs` — only the beep is debounced.
+The alert **action** is debounced (`src/ai_baby_monitor/alerts.py` `should_emit_alert`): the beep only fires on the leading edge of a violation confirmed by two consecutive positive verdicts within `min(1800, max(300, max_interval_seconds*3))` seconds. It is also gated by `is_alert_worthy`: in **night-vision mode** only a HIGH-confidence violation qualifies (grayscale/IR frames are noisier), so LOW/MEDIUM alerts are logged but do not beep. Every verdict is still written to `:logs` (with a `night_mode` flag) — only the beep is debounced/desensitized.
 
 ### Localization (i18n)
 
 User-facing text is bilingual, selected by `APP_LANG` (`zh` default, or `en`).
 
 - `src/ai_baby_monitor/i18n.py` holds all UI strings as `key -> {lang: text}` tables; call `t("key", **kwargs)` (placeholders are `{name}`). Missing keys fall back to the default language, then the key itself. The enum values `LOW`/`MEDIUM`/`HIGH` stay English in storage/schema; only their display labels (`awareness_LOW`…) are translated.
-- `watcher/base_prompt.py` builds the LLM prompt per language (`get_instructions_prompt(instructions, language=...)`, defaults to `get_language()`); the `zh` prompt asks the model to answer in Chinese while keeping the JSON field names English.
+- `watcher/base_prompt.py` builds the LLM prompt per language (`get_instructions_prompt(instructions, language=...)`, defaults to `get_language()`); the `zh` prompt asks the model to answer in Chinese while keeping the JSON field names English. Both prompts explain that IR night-vision produces grayscale frames (normal, not a fault) and to be more conservative in them. The same module hosts the annotation formatters (`format_frame_annotation(..., night=...)`, `format_skipped_annotation`, `format_mode_transition_annotation`).
 - `configs/*.yaml` sample instructions are Chinese; the streamlit mode options are stored as stable keys (`realtime`/`historic`) and translated for display via `st.radio(format_func=...)`.
 - structlog log messages and code identifiers stay English on purpose.
 
@@ -103,7 +104,7 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 ### Config
 
-`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. Required top-level keys: `name`, `camera.uri`, `instructions`. Optional camera keys (`subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `num_frames_to_process`, `motion_threshold`, `min_interval_seconds`, `max_interval_seconds`) fall back to dataclass defaults when absent — the loader only passes keys present in the YAML. `camera_uri` is a string in YAML ("0" for webcam index, or an RTSP URL); `stream_to_redis.py` converts all-digit URIs to `int`. The motion knobs are per-room (cameras differ); see "Motion gating & request throttling".
+`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. Required top-level keys: `name`, `camera.uri`, `instructions`. Optional camera keys (`subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `num_frames_to_process`, `motion_metric`, `motion_threshold`, `night_saturation_threshold`, `min_interval_seconds`, `max_interval_seconds`) fall back to dataclass defaults when absent — the loader only passes keys present in the YAML. `camera_uri` is a string in YAML ("0" for webcam index, or an RTSP URL); `stream_to_redis.py` converts all-digit URIs to `int`. The motion knobs are per-room (cameras differ); see "Motion gating & request throttling".
 
 ### Adding a room (touches several places)
 
@@ -131,3 +132,4 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 - Motion gating changes behavior by design: (1) it suppresses repeat `should_alert` beeps while a violation persists (the model is only re-asked when motion/heartbeat allows); (2) a static scene is only re-evaluated at the heartbeat cadence; (3) an event that occurs and resolves entirely inside a skipped gap is invisible. `motion_threshold: 0` restores the old "send everything, call every cycle" behavior.
 - `motion_threshold` is not portable across cameras (AGC/IR/compression shift the noise floor). Every analyze logs `motion_score`; to calibrate, run on an empty room with gating off and set the threshold just above the idle noise. For a safety monitor, prefer false positives (lower threshold) and rely on `min_interval_seconds` for cost control.
 - `subsampled_stream_maxlen` must cover `max_interval_seconds` at the subsampled frame rate, otherwise catch-up after a long heartbeat truncates the gap; the watcher warns ("does not cover the full gap") when this happens.
+- A grayscale frame is **night-vision (IR) mode**, not a camera fault — don't treat "the picture is black-and-white" as an error. The prompt tells the model this, night frames are annotated, and in night mode only HIGH-confidence violations beep (`is_alert_worthy`). If a camera's "B&W" has a slight tint, lower `night_saturation_threshold`.

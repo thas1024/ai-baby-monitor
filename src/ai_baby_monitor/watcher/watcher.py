@@ -6,10 +6,16 @@ import structlog
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
-from ai_baby_monitor.motion import ImageItem, build_timeline
+from ai_baby_monitor.motion import (
+    ImageItem,
+    ModeTransitionItem,
+    build_timeline,
+    is_night_frame,
+)
 from ai_baby_monitor.stream import Frame
 from ai_baby_monitor.watcher import (
     format_frame_annotation,
+    format_mode_transition_annotation,
     format_skipped_annotation,
     get_instructions_prompt,
 )
@@ -56,6 +62,7 @@ class Watcher:
         api_mode: str = "chat",
         motion_metric: str = "mean",
         motion_threshold: float | None = None,
+        night_saturation_threshold: float | None = None,
     ):
         """
         Initialize the Watcher with instructions and OpenAI-compatible endpoint details.
@@ -75,6 +82,8 @@ class Watcher:
             motion_metric: How frame difference is scored — "mean" (whole-frame),
                 "grid_max" (busiest cell, sensitive to small motion), or
                 "changed_fraction" (share of changed pixels). See ``motion.py``.
+            night_saturation_threshold: Mean HSV saturation at or below which a
+                frame is treated as night-vision/greyscale. None uses the default.
         """
         if api_mode not in ("chat", "responses"):
             raise ValueError(
@@ -85,6 +94,7 @@ class Watcher:
         self.json_schema = self._make_strict(WatcherResponse.model_json_schema())
         self.motion_metric = motion_metric
         self.motion_threshold = motion_threshold
+        self.night_saturation_threshold = night_saturation_threshold
 
         self.model_name = model_name
         self.base_url = base_url
@@ -148,12 +158,29 @@ class Watcher:
         place what it sees on a timeline.
         """
         parts: list[ContentPart] = []
-        for item in build_timeline(frames, self.motion_threshold, self.motion_metric):
+        for item in build_timeline(
+            frames,
+            self.motion_threshold,
+            self.motion_metric,
+            self.night_saturation_threshold,
+        ):
             if isinstance(item, ImageItem):
                 parts.append(
-                    TextPart(format_frame_annotation(item.index, item.frame.timestamp))
+                    TextPart(
+                        format_frame_annotation(
+                            item.index, item.frame.timestamp, night=item.night
+                        )
+                    )
                 )
                 parts.append(ImagePart(base64.b64encode(bytes(item.frame.frame_data)).decode("utf-8")))
+            elif isinstance(item, ModeTransitionItem):
+                parts.append(
+                    TextPart(
+                        format_mode_transition_annotation(
+                            item.to_night, item.timestamp
+                        )
+                    )
+                )
             else:
                 parts.append(
                     TextPart(
@@ -355,6 +382,9 @@ class Watcher:
                 "raw_response": raw_response,
                 "images_sent": images_sent,
                 "frames_skipped": len(frames) - images_sent,
+                "night_mode": is_night_frame(
+                    frames[-1].frame_data, self.night_saturation_threshold
+                ),
             }
 
         except Exception as e:

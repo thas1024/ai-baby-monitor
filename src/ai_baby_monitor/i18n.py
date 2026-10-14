@@ -48,6 +48,9 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "awareness_level": {"zh": "关注等级： {level}", "en": "Awareness level: {level}"},
     "reasoning": {"zh": "判断理由： {reasoning}", "en": "Reasoning: {reasoning}"},
     "error": {"zh": "错误： {error}", "en": "Error: {error}"},
+    "night_mode": {"zh": "夜视模式： {value}", "en": "Night vision: {value}"},
+    "yes": {"zh": "是", "en": "yes"},
+    "no": {"zh": "否", "en": "no"},
     # Awareness level display labels (stored values stay LOW/MEDIUM/HIGH)
     "awareness_LOW": {"zh": "低", "en": "LOW"},
     "awareness_MEDIUM": {"zh": "中", "en": "MEDIUM"},

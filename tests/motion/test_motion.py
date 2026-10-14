@@ -195,3 +195,61 @@ def test_unknown_metric_falls_back_to_mean():
     base = _solid(100)
     other = _solid(200)
     assert frame_diff_score(base, other, metric="bogus") == frame_diff_score(base, other, metric="mean")
+
+
+# --- night-vision detection + day/night transitions ---
+
+def _gray_jpeg(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    gray = (rng.random((90, 160)) * 255).astype("uint8")
+    ok, buffer = cv2.imencode(".jpg", gray)
+    assert ok
+    return buffer
+
+
+def test_night_frame_detected_for_grayscale():
+    from ai_baby_monitor.motion import is_night_frame
+
+    assert is_night_frame(_gray_jpeg(1)) is True
+
+
+def test_color_frame_is_not_night():
+    from ai_baby_monitor.motion import is_night_frame
+
+    assert is_night_frame(_jpeg(1)) is False
+
+
+def test_undecodable_frame_is_not_night():
+    from ai_baby_monitor.motion import is_night_frame
+
+    assert is_night_frame(np.array([1, 2, 3], dtype=np.uint8)) is False
+
+
+def test_image_item_carries_night_flag():
+    from ai_baby_monitor.motion import ImageItem
+
+    items = build_timeline([_frame(_gray_jpeg(1))], threshold=3.0)
+    assert isinstance(items[0], ImageItem)
+    assert items[0].night is True
+
+
+def test_day_to_night_transition_resets_anchor_and_annotates():
+    from ai_baby_monitor.motion import ModeTransitionItem
+
+    color = _jpeg(1)
+    gray = _gray_jpeg(9)
+    frames = [
+        _frame(color, 0),
+        _frame(color.copy(), 1),
+        _frame(gray, 2),
+        _frame(gray.copy(), 3),
+    ]
+    items = build_timeline(frames, threshold=3.0)
+
+    kinds = [type(i) for i in items]
+    assert kinds == [ImageItem, SkippedItem, ModeTransitionItem, ImageItem, SkippedItem]
+    transition = items[2]
+    assert transition.to_night is True
+    # The post-switch grayscale frames share the new anchor -> only one image, no burst.
+    assert items[3].night is True
+    assert items[4].count == 1
