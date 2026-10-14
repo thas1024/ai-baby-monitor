@@ -50,7 +50,7 @@ A room has **one or more cameras** (angles). Frame streams are per camera
 
 - `ai_baby_monitor:{room}:{camera}:realtime` — last 3 frames, `approximate=False`; read by the viewer. An **unnamed legacy camera omits `{camera}`** (`ai_baby_monitor:{room}:realtime`) so old deployments don't move keys.
 - `ai_baby_monitor:{room}:{camera}:subsampled` — every Nth frame (`subsample_rate`), capped at `subsampled_stream_maxlen`; read by the watcher.
-- `ai_baby_monitor:{room}:logs` — one room-level timeline: the merged verdict (`should_alert`, `awareness_level`, `reasoning`, `night_mode`) plus a representative-frame **thumbnail per camera** (`frame` for a legacy single camera, `frame__{camera}` for named ones) and error records (`{timestamp, error}`). `render_logs` shows a timeline; `deserialize_log` keeps `frame`/`frame__*` as bytes.
+- `ai_baby_monitor:{room}:logs` — one room-level timeline: the merged verdict (`should_alert`, `awareness_level`, `reasoning`, `night_mode`) plus a representative-frame **thumbnail per camera** (`frame` for a legacy single camera, `frame__{camera}` for named ones) and non-verdict health records (`{timestamp, error}` / `{timestamp, info}`). The watcher records "no live video" / "video restored" only on the **leading edge** of a transition, so a long outage is two entries, not one per poll. `render_logs` shows a timeline; `deserialize_log` keeps `frame`/`frame__*` as bytes. Timestamps are stored as UTC epoch and rendered in `APP_TZ` (see below).
 
 Data flow: `CameraStream` grabs a frame → JPEG-encodes it into a `Frame(frame_data: np.ndarray, timestamp, frame_idx)` → `RedisStreamHandler` stores raw bytes → the watcher deserializes and sends each frame as its own `image_url` content part (`data:image/jpeg;base64,...`) alongside the instructions text.
 
@@ -93,7 +93,7 @@ User-facing text is bilingual, selected by `APP_LANG` (`zh` default, or `en`).
 - `configs/*.yaml` sample instructions are Chinese; the streamlit mode options are stored as stable keys (`realtime`/`historic`) and translated for display via `st.radio(format_func=...)`.
 - structlog log messages and code identifiers stay English on purpose.
 
-Streamlit reads frames/logs back and renders them. The historic-logs view is a **timeline (newest first)**: every entry is a `st.expander` carrying its representative photo (`imaging.encode_thumbnail` stores a downscaled JPEG in the log entry); anomalous entries (alert or MEDIUM/HIGH awareness) default to expanded, normal ones to collapsed. The viewer loop (`while True` in `scripts/streamlit_viewer.py`) polls Redis for the newest frame and log each rerun.
+Streamlit reads frames/logs back and renders them. The historic-logs view is a **timeline (newest first)**: every entry is a `st.expander` carrying its representative photo (`imaging.encode_thumbnail` stores a downscaled JPEG in the log entry); anomalous entries (alert or MEDIUM/HIGH awareness) default to expanded, normal ones to collapsed. Timestamps render in `APP_TZ` (IANA name; the container defaults to `TZ`). Note: `render_logs` opens an expander per entry, so callers must not wrap it in another expander (Streamlit forbids nesting). The viewer loop (`while True` in `scripts/streamlit_viewer.py`) polls Redis for the newest frame and log each rerun.
 
 ### Watcher
 
@@ -120,7 +120,7 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 `python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It has no `depends_on` (Redis is external). `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
 
-`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, plus `VLLM_PORT` for the local profile).
+`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
 
 ## Gotchas
 

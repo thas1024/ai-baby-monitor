@@ -131,6 +131,9 @@ def run_watcher(
     recent_verdicts: list[tuple[bool, float]] = []
     alert_gap_seconds = min(1800.0, max(300.0, max_interval_seconds * 3))
 
+    # Leading-edge tracking for the "no live video" health event.
+    blank_active = False
+
     try:
         while True:
             now_monotonic = time.monotonic()
@@ -230,20 +233,31 @@ def run_watcher(
                 logger.warning("Cameras with no signal (blank frames)", cameras=dead_cameras)
                 windows = [w for w in windows if w.name not in dead_cameras]
 
+            # Only record the "no live video" health event on the leading edge (and
+            # a matching recovery), so a long outage does not flood the logs stream.
             if not windows:
                 logger.warning("All cameras blank; skipping analysis", room=room_name)
-                redis_handler.add_logs(
-                    logs_key,
-                    {
-                        "timestamp": time.time(),
-                        "error": "no live video: all cameras returned blank/flat "
-                        "frames (stream likely failed)",
-                    },
-                )
-                # Throttle these health warnings to the room's min interval.
+                if not blank_active:
+                    blank_active = True
+                    redis_handler.add_logs(
+                        logs_key,
+                        {
+                            "timestamp": time.time(),
+                            "error": "no live video: all cameras returned blank/flat "
+                            "frames (stream likely failed)",
+                        },
+                    )
+                # Throttle these polls to the room's min interval.
                 last_call_monotonic = time.monotonic()
                 time.sleep(WATCHER_POLL_SECONDS)
                 continue
+
+            if blank_active:
+                blank_active = False
+                redis_handler.add_logs(
+                    logs_key,
+                    {"timestamp": time.time(), "info": "video restored (live frames again)"},
+                )
 
             logger.info(
                 "Analyzing cameras",

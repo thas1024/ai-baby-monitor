@@ -1,6 +1,7 @@
 import datetime as dt
 import io
 import os
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import streamlit as st
 from PIL import Image
@@ -8,6 +9,26 @@ from PIL import Image
 from ai_baby_monitor.i18n import t
 from ai_baby_monitor.keys import camera_keys
 from ai_baby_monitor.stream import RedisStreamHandler
+
+
+def _display_tz() -> dt.tzinfo | None:
+    """Timezone for rendering timestamps, from ``APP_TZ`` (IANA name).
+
+    Defaults to the system local timezone when unset/unrecognized. Set
+    ``APP_TZ=Asia/Shanghai`` (or similar) so the dashboard shows local time even
+    when the container runs in UTC.
+    """
+    name = os.getenv("APP_TZ")
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _localize(epoch_seconds: float) -> dt.datetime:
+    return dt.datetime.fromtimestamp(epoch_seconds, tz=_display_tz())
 
 
 def display_sidebar(
@@ -102,7 +123,7 @@ def fetch_logs(
     new_logs = []
     for log_id, log_data in logs:
         log_data = redis_handler.deserialize_log(log_data)
-        log_data["timestamp"] = dt.datetime.fromtimestamp(float(log_data["timestamp"]))
+        log_data["timestamp"] = _localize(float(log_data["timestamp"]))
 
         # Collect the representative photo(s). Legacy single-camera uses `frame`;
         # multi-camera rooms use `frame__{camera}` — show every one, labeled.
@@ -152,12 +173,18 @@ def render_logs(logs: list[dict]):
     while normal ones default to collapsed.
     """
     for log in reversed(logs):  # newest first
-        timestamp = log.get("timestamp")
+        ts = log.get("timestamp")
+        # Show to the second (a wall-clock review doesn't need microseconds).
+        timestamp = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, dt.datetime) else ts
 
-        # Error records: {timestamp, error} — no verdict fields, no photo.
-        if "error" in log and "should_alert" not in log:
-            with st.expander(f"⚠️ {timestamp}", expanded=False):
-                st.write(t("error", error=log["error"]))
+        # Error/health records: {timestamp, error|info} — no verdict fields, no photo.
+        if "should_alert" not in log:
+            if "error" in log:
+                with st.expander(f"⚠️ {timestamp}", expanded=False):
+                    st.write(t("error", error=log["error"]))
+            elif "info" in log:
+                with st.expander(f"ℹ️ {timestamp}", expanded=False):
+                    st.write(log["info"])
             continue
 
         alert_icon = "🚨" if str(log.get("should_alert")) == "1" else "🟢"

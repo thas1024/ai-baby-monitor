@@ -118,3 +118,27 @@ def test_render_logs_shows_multiple_camera_photos():
         patcher.stop()
 
     assert mock_st.image.call_count == 2
+
+
+def test_render_logs_handles_info_record():
+    patcher, mock_st = _patch_st()
+    try:
+        sc.render_logs([{"timestamp": "t", "info": "video restored"}])
+    finally:
+        patcher.stop()
+    assert mock_st.expander.called
+
+
+def test_localize_uses_app_tz(monkeypatch):
+    import datetime as dt
+
+    monkeypatch.setenv("APP_TZ", "Asia/Shanghai")
+    epoch = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc).timestamp()
+    out = sc._localize(epoch)
+    assert out.hour == 8  # UTC+8
+    assert out.utcoffset() == dt.timedelta(hours=8)
+
+
+def test_localize_bad_tz_falls_back(monkeypatch):
+    monkeypatch.setenv("APP_TZ", "Not/AZone")
+    assert sc._display_tz() is None
