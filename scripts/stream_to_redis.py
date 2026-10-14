@@ -16,6 +16,8 @@ load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = os.getenv("REDIS_PORT")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+# Frame decode backend: cpu | qsv | vaapi | auto (auto prefers Intel GPU).
+CAMERA_DECODE = os.getenv("CAMERA_DECODE", "auto")
 
 
 def stream_to_redis(
@@ -30,6 +32,7 @@ def stream_to_redis(
     subsample_rate: int = 4,
     redis_password: str | None = None,
     camera_name: str | None = None,
+    decode: str = "auto",
 ):
     """
     Stream camera frames to Redis short realtime and long subsampled queues.
@@ -63,7 +66,9 @@ def stream_to_redis(
             uri=camera_uri,
             save_stream_path=save_stream_path,
             frame_shape=frame_shape,
+            decode=decode,
         )
+        logger.info("Frame decode backend", requested=decode, active=camera.decode)
 
         # Initialize Redis stream handler
         redis_handler = RedisStreamHandler(
@@ -192,6 +197,7 @@ if __name__ == "__main__":
             subsample_rate=camera.subsample_rate,
             redis_password=REDIS_PASSWORD,
             camera_name=camera.name,
+            decode=CAMERA_DECODE,
         )
     except Exception as e:
         logger.error("Failed to start streaming", error=e)

@@ -33,7 +33,7 @@ def mock_cv2_video_writer():
 def camera_stream_no_save(mock_video_capture_constructor, mock_cv2_video_capture):
     """Fixture for CameraStream without saving the stream."""
     mock_video_capture_constructor.return_value = mock_cv2_video_capture
-    stream = CameraStream(uri="rtsp://mock")
+    stream = CameraStream(uri="rtsp://mock", decode="cpu")
     return stream, mock_cv2_video_capture
 
 
@@ -56,7 +56,10 @@ def camera_stream_with_save(
 
     save_path = str(tmp_path / "test_video.mp4")
     stream = CameraStream(
-        uri="rtsp://mock", save_stream_path=save_path, frame_shape=(320, 240)
+        uri="rtsp://mock",
+        save_stream_path=save_path,
+        frame_shape=(320, 240),
+        decode="cpu",
     )
     # Return the class mocks as well so the test can assert on them if needed, or just the instances.
     return (
@@ -140,3 +143,92 @@ def test_close_with_writer(camera_stream_with_save):
     stream.close()
     mock_capture.release.assert_called_once()
     mock_writer_instance.release.assert_called_once()
+
+
+# --- hardware decode selection ---
+
+from ai_baby_monitor.stream.camera_stream import resolve_decode, _FfmpegDecoder
+
+
+def test_resolve_decode_cpu_passthrough():
+    assert resolve_decode("cpu") == "cpu"
+
+
+def test_resolve_decode_explicit_hwacecl_passthrough():
+    assert resolve_decode("qsv") == "qsv"
+    assert resolve_decode("vaapi") == "vaapi"
+
+
+def test_resolve_decode_unknown_falls_back_to_auto(monkeypatch):
+    # unknown -> auto -> cpu when no render device
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream.os.path.exists", lambda p: False
+    )
+    assert resolve_decode("bogus") == "cpu"
+
+
+def test_resolve_decode_auto_no_device_is_cpu(monkeypatch):
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream.os.path.exists", lambda p: False
+    )
+    assert resolve_decode("auto") == "cpu"
+
+
+def test_resolve_decode_auto_prefers_vaapi(monkeypatch):
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream.os.path.exists", lambda p: True
+    )
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream._ffmpeg_hwaccels",
+        lambda bin: {"vaapi", "qsv"},
+    )
+    assert resolve_decode("auto") == "vaapi"
+
+
+def test_resolve_decode_auto_qsv_when_no_vaapi(monkeypatch):
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream.os.path.exists", lambda p: True
+    )
+    monkeypatch.setattr(
+        "ai_baby_monitor.stream.camera_stream._ffmpeg_hwaccels", lambda bin: {"qsv"}
+    )
+    assert resolve_decode("auto") == "qsv"
+
+
+def test_ffmpeg_cmd_qsv():
+    with patch("ai_baby_monitor.stream.camera_stream.subprocess.Popen") as popen, \
+         patch("ai_baby_monitor.stream.camera_stream.threading.Thread"):
+        popen.return_value = MagicMock()
+        dec = _FfmpegDecoder("rtsp://cam/s", "qsv", (640, 360))
+        cmd = dec._build_cmd()
+    assert "-hwaccel" in cmd and "qsv" in cmd
+    assert "scale=640:360" in " ".join(cmd)
+    assert cmd[-1] == "-"
+
+
+def test_ffmpeg_cmd_vaapi_uses_device():
+    with patch("ai_baby_monitor.stream.camera_stream.subprocess.Popen") as popen, \
+         patch("ai_baby_monitor.stream.camera_stream.threading.Thread"):
+        popen.return_value = MagicMock()
+        dec = _FfmpegDecoder("rtsp://cam/s", "vaapi", (640, 360))
+        cmd = dec._build_cmd()
+    assert "-hwaccel_device" in cmd
+    assert "/dev/dri/renderD128" in cmd
+
+
+def test_ffmpeg_decoder_reads_frame():
+    """A full frame of pipe bytes is reshaped into a BGR array."""
+    frame_bytes = bytes(640 * 360 * 3)
+    fake_proc = MagicMock()
+    fake_proc.stdout.read.return_value = frame_bytes
+
+    with patch("ai_baby_monitor.stream.camera_stream.subprocess.Popen", return_value=fake_proc), \
+         patch("ai_baby_monitor.stream.camera_stream.threading.Thread"):
+        dec = _FfmpegDecoder("rtsp://cam/s", "vaapi", (640, 360))
+
+    dec._proc = fake_proc
+    # one successful frame then EOF
+    fake_proc.stdout.read.side_effect = [frame_bytes, b""]
+    dec._read_frames()
+    assert dec.latest() is not None
+    assert dec.latest().shape == (360, 640, 3)

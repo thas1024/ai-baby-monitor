@@ -73,6 +73,14 @@ services:
       service: python-base
     networks:
       - app-network
+    # Intel GPU passthrough for hardware decode (CAMERA_DECODE=auto/qsv/vaapi).
+    # Harmless where there is no GPU: CAMERA_DECODE falls back to CPU. The group
+    # ids match the Linux host (video=44, render=105 on Debian).
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"
+      - "105"
     command: >
       sh -c "
       uv run python scripts/stream_to_redis.py --config-file configs/living_room.yaml

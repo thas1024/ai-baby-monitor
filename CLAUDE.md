@@ -120,7 +120,13 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 `python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It has no `depends_on` (Redis is external). `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
 
-`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
+`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `CAMERA_DECODE`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
+
+### Frame decoding (CPU vs Intel GPU)
+
+`CAMERA_DECODE` selects how `stream_to_redis` decodes frames: `cpu` (OpenCV decode), `vaapi` / `qsv` (decode on an Intel GPU via an `ffmpeg` subprocess), or `auto` (default — prefers **VAAPI**, then QSV, then CPU). `CameraStream` (`stream/camera_stream.py`) keeps the same `capture_new_frame()` interface; the GPU path pipes `bgr24` rawvideo from `ffmpeg` (`-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -vf hwdownload,format=nv12,scale=W:H,format=bgr24`), keeps only the newest frame, and restarts ffmpeg on stream end. If no Intel hardware is available (no `/dev/dri`, or ffmpeg lacks the hwaccel), `auto` falls back to `cpu`.
+
+The `stream_to_redis` service passes the GPU through: `devices: [/dev/dri:/dev/dri]` and `group_add: ["44", "105"]` (video/render gids). The image installs `libva2 libva-drm2 intel-media-va-driver vainfo`. Note: decode moves to the GPU but the 4K→target `scale` and JPEG encode stay on the CPU — on a weak CPU prefer the camera's **substream** (`Channels/102`) as well.
 
 ## Gotchas
 
@@ -138,3 +144,4 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 - A **flat/blank frame** (uniform gray value ~128, grayscale std ~0) means the **stream has no signal** (RTSP pull failed), *not* night-vision — `is_night_frame` requires actual content (`is_blank_frame` excludes uniform frames). The watcher drops blank cameras, logs a `no live video` error record (throttled to `min_interval_seconds`) instead of calling the model, and does not advance their baseline; if this appears often, fix the capture side.
 - Multi-camera cost scales with the number of cameras × per-camera images per request (up to `num_frames_to_process` each on a first window). Keep `--limit-mm-per-prompt image=` (vLLM) above the total, and rely on per-camera `motion_threshold` (a static angle compresses to one anchor image) plus the room-level `min_interval_seconds`.
 - Migrating a room from the legacy `camera:` block to a named `cameras:` list **changes its Redis keys** (`{room}:subsampled` → `{room}:{camera}:subsampled`); no data migration is needed, just restart the producers — but an unnamed camera keeps the legacy unscoped keys.
+- Hardware decode (`CAMERA_DECODE=vaapi`) needs `/dev/dri` passed into the container and the Intel VAAPI driver; the `stream_to_redis` service already mounts it. Verified working on an Intel N100 (iHD driver, HEVC Main/Main10). QSV is often unavailable in containers (needs the MFX/oneVPL runtime) — `auto` prefers VAAPI for that reason.

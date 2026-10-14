@@ -1,7 +1,12 @@
 FROM python:3.12-slim-bookworm
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-RUN apt-get update && apt-get install ffmpeg libsm6 libxext6  -y
+# ffmpeg decodes RTSP; the libva/iHD packages let ffmpeg use an Intel GPU
+# (VAAPI/QSV) when /dev/dri is passed through (see docker-compose.yml).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libsm6 libxext6 \
+        libva2 libva-drm2 intel-media-va-driver vainfo \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
