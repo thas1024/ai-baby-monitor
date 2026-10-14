@@ -232,3 +232,21 @@ def test_ffmpeg_decoder_reads_frame():
     dec._read_frames()
     assert dec.latest() is not None
     assert dec.latest().shape == (360, 640, 3)
+
+
+def test_ffmpeg_decoder_next_frame_blocks_for_new_frame():
+    """next_frame returns each decoded frame once, then times out with no new one."""
+    frame_bytes = bytes(640 * 360 * 3)
+    fake_proc = MagicMock()
+    with patch("ai_baby_monitor.stream.camera_stream.subprocess.Popen", return_value=fake_proc), \
+         patch("ai_baby_monitor.stream.camera_stream.threading.Thread"):
+        dec = _FfmpegDecoder("rtsp://cam/s", "vaapi", (640, 360))
+
+    dec._proc = fake_proc
+    fake_proc.stdout.read.side_effect = [frame_bytes, b""]
+    dec._read_frames()  # decodes exactly 1 frame -> seq=1
+
+    first = dec.next_frame(timeout=1.0)
+    assert first is not None
+    # No new frame since -> times out returning None (does NOT re-serve the same one)
+    assert dec.next_frame(timeout=0.1) is None

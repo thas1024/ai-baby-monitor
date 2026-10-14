@@ -90,9 +90,10 @@ class _FfmpegDecoder:
         self.ffmpeg_bin = ffmpeg_bin
         self._frame_size = self.width * self.height * 3
 
-        self._lock = threading.Lock()
-        self._latest: np.ndarray | None = None
-        self._first_frame = threading.Event()
+        self._cond = threading.Condition()
+        self._frame: np.ndarray | None = None
+        self._seq = 0  # increments on every decoded frame
+        self._served_seq = 0  # last seq handed to the consumer
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._thread = threading.Thread(target=self._run, name="ffmpeg-decode", daemon=True)
@@ -166,17 +167,34 @@ class _FfmpegDecoder:
             frame = np.frombuffer(buf, dtype=np.uint8).reshape(
                 (self.height, self.width, 3)
             )
-            with self._lock:
-                self._latest = frame
-            self._first_frame.set()
+            with self._cond:
+                self._frame = frame
+                self._seq += 1
+                self._cond.notify_all()
 
     def wait_first_frame(self, timeout: float) -> bool:
         """Block until a frame arrives or ``timeout`` elapses (for startup check)."""
-        return self._first_frame.wait(timeout)
+        with self._cond:
+            return self._cond.wait_for(lambda: self._seq > 0, timeout)
+
+    def next_frame(self, timeout: float) -> np.ndarray | None:
+        """Block until a frame newer than the last returned one is available.
+
+        Returns the newest frame, or None on timeout (no new frame). This mirrors
+        a blocking ``grab()`` so a consumer loop advances at the stream's rate
+        instead of spinning and re-serving the same frame.
+        """
+        with self._cond:
+            if self._seq == self._served_seq:
+                self._cond.wait_for(lambda: self._seq != self._served_seq, timeout)
+            if self._seq == self._served_seq:
+                return None
+            self._served_seq = self._seq
+            return self._frame
 
     def latest(self) -> np.ndarray | None:
-        with self._lock:
-            return self._latest
+        with self._cond:
+            return self._frame
 
     def _terminate_proc(self) -> None:
         proc = self._proc
@@ -190,6 +208,8 @@ class _FfmpegDecoder:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._cond:
+            self._cond.notify_all()  # wake a blocked next_frame()
         self._terminate_proc()
         if self._thread.is_alive():
             self._thread.join(timeout=5)
@@ -286,7 +306,7 @@ class CameraStream:
     def _grab_raw_frame(self) -> np.ndarray | None:
         """Get the next available frame as a BGR array (no JPEG encoding yet)."""
         if self._decoder is not None:
-            return self._decoder.latest()
+            return self._decoder.next_frame(timeout=5.0)
         if not self.capture.grab():
             logger.warning("No frame available to grab")
             return None
