@@ -11,7 +11,7 @@ from ai_baby_monitor.ui import (
     display_sidebar,
     fetch_logs,
     get_cached_redis_handler,
-    get_last_image_with_timestamp,
+    get_camera_images,
     render_logs,
 )
 
@@ -69,13 +69,17 @@ if selected_mode == "realtime":
 
     while True:
         with stream_placeholder.container():
-            image, timestamp = get_last_image_with_timestamp(
-                redis_handler, selected_config.name
+            cameras = get_camera_images(
+                redis_handler, selected_config.name, selected_config.cameras
             )
-            if image:
-                st.image(image, use_container_width=True)
-                with st.expander(t("frame_info")):
-                    st.caption(t("timestamp", ts=timestamp))
+            for label, image, timestamp in cameras:
+                st.caption(t("camera_photo_label", camera=label))
+                if image:
+                    st.image(image, use_container_width=True)
+                    with st.expander(t("frame_info")):
+                        st.caption(t("timestamp", ts=timestamp))
+                else:
+                    st.caption(t("no_photo"))
 
         with log_placeholder.container(height=350):
             with st.expander(t("llm_logs"), expanded=True, icon="🤖"):

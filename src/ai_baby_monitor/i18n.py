@@ -24,6 +24,13 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "mode_historic": {"zh": "历史日志", "en": "Historic logs"},
     "instructions_label": {"zh": "监控规则：", "en": "Instructions:"},
     "camera_details": {"zh": "摄像头信息", "en": "Camera details"},
+    "camera_default": {"zh": "默认", "en": "default"},
+    "camera_uri_line": {"zh": "{camera}： {uri}", "en": "{camera}: {uri}"},
+    "camera_geometry": {
+        "zh": "{w}×{h}，每 {rate} 帧取 1 帧",
+        "en": "{w}×{h}, 1 of every {rate} frames",
+    },
+    "camera_photo_label": {"zh": "摄像头「{camera}」", "en": "Camera \"{camera}\""},
     "camera_uri": {"zh": "摄像头地址： {uri}", "en": "Camera URI:  {uri}"},
     "frame_width": {"zh": "画面宽度： {value}", "en": "Frame width: {value}"},
     "frame_height": {"zh": "画面高度： {value}", "en": "Frame height: {value}"},

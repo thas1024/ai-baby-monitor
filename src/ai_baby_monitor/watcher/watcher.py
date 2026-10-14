@@ -14,6 +14,7 @@ from ai_baby_monitor.motion import (
 )
 from ai_baby_monitor.stream import Frame
 from ai_baby_monitor.watcher import (
+    format_camera_header,
     format_frame_annotation,
     format_mode_transition_annotation,
     format_skipped_annotation,
@@ -38,6 +39,22 @@ class ImagePart:
 
 
 ContentPart = TextPart | ImagePart
+
+
+@dataclass
+class CameraWindow:
+    """One camera's frames for a single analysis, with its own motion settings.
+
+    ``name`` labels the view in the prompt (``None`` for a legacy single camera).
+    The motion/night settings default per camera so a multi-camera room can use a
+    different threshold per angle.
+    """
+
+    frames: list[Frame]
+    name: str | None = None
+    motion_metric: str = "mean"
+    motion_threshold: float | None = None
+    night_threshold: float | None = None
 
 
 class AwarenessLevel(str, Enum):
@@ -149,46 +166,60 @@ class Watcher:
         walk(schema)
         return schema
 
-    def _build_content(self, frames: list[Frame]) -> list[ContentPart]:
-        """Turn a window of frames into request content parts.
+    def _build_content(self, windows: list[CameraWindow]) -> list[ContentPart]:
+        """Turn camera windows into request content parts.
 
-        Compresses near-identical frames into time-annotated text notes (via
-        ``build_timeline``), so only changed frames are sent as images. Each
-        image is preceded by a ``[frame N @ <time>]`` annotation so the model can
-        place what it sees on a timeline.
+        ``build_timeline`` compresses near-identical frames into time-annotated
+        text notes so only changed frames are sent as images. Each camera's block
+        is preceded by a header naming the view, and every frame annotation is
+        labeled with the camera name too (models sometimes ignore a lone header).
         """
         parts: list[ContentPart] = []
-        for item in build_timeline(
-            frames,
-            self.motion_threshold,
-            self.motion_metric,
-            self.night_saturation_threshold,
-        ):
-            if isinstance(item, ImageItem):
-                parts.append(
-                    TextPart(
-                        format_frame_annotation(
-                            item.index, item.frame.timestamp, night=item.night
+        for window in windows:
+            if window.name:
+                parts.append(TextPart(format_camera_header(window.name)))
+
+            for item in build_timeline(
+                window.frames,
+                window.motion_threshold,
+                window.motion_metric,
+                window.night_threshold,
+            ):
+                if isinstance(item, ImageItem):
+                    parts.append(
+                        TextPart(
+                            format_frame_annotation(
+                                item.index,
+                                item.frame.timestamp,
+                                night=item.night,
+                                camera=window.name,
+                            )
                         )
                     )
-                )
-                parts.append(ImagePart(base64.b64encode(bytes(item.frame.frame_data)).decode("utf-8")))
-            elif isinstance(item, ModeTransitionItem):
-                parts.append(
-                    TextPart(
-                        format_mode_transition_annotation(
-                            item.to_night, item.timestamp
+                    parts.append(
+                        ImagePart(
+                            base64.b64encode(bytes(item.frame.frame_data)).decode("utf-8")
                         )
                     )
-                )
-            else:
-                parts.append(
-                    TextPart(
-                        format_skipped_annotation(
-                            item.count, item.start_ts, item.end_ts
+                elif isinstance(item, ModeTransitionItem):
+                    parts.append(
+                        TextPart(
+                            format_mode_transition_annotation(
+                                item.to_night, item.timestamp, camera=window.name
+                            )
                         )
                     )
-                )
+                else:
+                    parts.append(
+                        TextPart(
+                            format_skipped_annotation(
+                                item.count,
+                                item.start_ts,
+                                item.end_ts,
+                                camera=window.name,
+                            )
+                        )
+                    )
         return parts
 
     def _calculate_fps(self, frames: list[Frame], default_fps: int = 2) -> int:
@@ -349,7 +380,7 @@ class Watcher:
         raise last_error
 
     def process_frames(self, frames: list[Frame]) -> dict[str, str | bool]:
-        """Process frames to detect instruction violations.
+        """Process a single camera's frames (single-camera wrapper over process_room).
 
         Returns:
             dict containing:
@@ -358,21 +389,46 @@ class Watcher:
                 - reasoning (str): Explanation for the decision
                 - recommended_awareness_level (str): Suggested monitoring level. Should be one of: LOW, MEDIUM, HIGH
                 - raw_response (str): Original model response
+                - images_sent / frames_skipped (int): compression accounting
+                - night_mode (bool): whether the last frame is night-vision
                 - error (str, optional): Error message if processing failed
         """
-        if not frames:
+        return self.process_room(
+            [
+                CameraWindow(
+                    frames=frames,
+                    name=None,
+                    motion_metric=self.motion_metric,
+                    motion_threshold=self.motion_threshold,
+                    night_threshold=self.night_saturation_threshold,
+                )
+            ]
+        )
+
+    def process_room(self, windows: list[CameraWindow]) -> dict[str, str | bool]:
+        """Analyze one or more cameras in a single merged LLM request.
+
+        Each window's frames are annotated with the camera name so the model sees
+        all angles together. An empty window is ignored; if no window has frames
+        the call is skipped with an error result.
+        """
+        windows = [w for w in windows if w.frames]
+        if not windows:
             logger.warning("No frames provided for processing")
-            return {
-                "success": False,
-                "error": "No frames provided",
-            }
+            return {"success": False, "error": "No frames provided"}
 
         try:
-            parts = self._build_content(frames)
+            parts = self._build_content(windows)
             images_sent = sum(1 for part in parts if isinstance(part, ImagePart))
+            total_frames = sum(len(window.frames) for window in windows)
             raw_response = self._create_completion(parts)
 
             parsed_response = WatcherResponse.model_validate_json(raw_response)
+
+            night_mode = all(
+                is_night_frame(window.frames[-1].frame_data, window.night_threshold)
+                for window in windows
+            )
 
             return {
                 "success": True,
@@ -381,10 +437,8 @@ class Watcher:
                 "recommended_awareness_level": parsed_response.recommended_awareness_level,
                 "raw_response": raw_response,
                 "images_sent": images_sent,
-                "frames_skipped": len(frames) - images_sent,
-                "night_mode": is_night_frame(
-                    frames[-1].frame_data, self.night_saturation_threshold
-                ),
+                "frames_skipped": total_frames - images_sent,
+                "night_mode": night_mode,
             }
 
         except Exception as e:

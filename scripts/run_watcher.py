@@ -8,12 +8,12 @@ from dotenv import load_dotenv
 from playsound3 import playsound
 
 from ai_baby_monitor.alerts import is_alert_worthy, should_emit_alert
-from ai_baby_monitor.config import load_room_config_file
+from ai_baby_monitor.config import CameraConfig, load_room_config_file
 from ai_baby_monitor.imaging import encode_thumbnail
-from ai_baby_monitor.keys import room_keys
+from ai_baby_monitor.keys import camera_keys, room_keys
 from ai_baby_monitor.motion import frame_diff_score, should_analyze
 from ai_baby_monitor.stream import RedisStreamHandler
-from ai_baby_monitor.watcher import Watcher
+from ai_baby_monitor.watcher import CameraWindow, Watcher
 
 logger = structlog.get_logger()
 
@@ -61,87 +61,71 @@ def _play_alert(sound_path: str = "assets/alert.wav") -> None:
 
 
 def run_watcher(
-    redis_stream_key: str,
-    redis_host: str,
-    redis_port: int,
+    room_name: str,
+    cameras: list[CameraConfig],
     instructions: list[str],
     base_url: str,
     api_key: str,
     model_name: str,
     num_frames_to_process: int,
+    redis_host: str,
+    redis_port: int,
     api_mode: str = "chat",
     redis_password: str | None = None,
-    motion_metric: str = "mean",
-    motion_threshold: float | None = None,
-    night_saturation_threshold: float | None = None,
     min_interval_seconds: float = 10.0,
     max_interval_seconds: float = 30.0,
-    subsampled_stream_maxlen: int = 128,
 ):
     """
-    Run the Watcher continuously to monitor frames from Redis stream.
+    Run the Watcher continuously to monitor a room's cameras from Redis streams.
 
-    Request rate is controlled by motion gating (see ``ai_baby_monitor.motion``):
-    a cycle only calls the model when the newest frame differs from the last
-    analyzed frame, or the heartbeat interval elapses — floored by
-    ``min_interval_seconds``. A ``motion_threshold`` of 0 disables gating.
+    One LLM request merges all cameras: when *any* camera's motion gate opens (and
+    the room-wide minimum interval has elapsed, or the heartbeat fires), every
+    camera's window is fetched and sent together, each labeled with its camera
+    name, so the model sees all angles at once.
 
     Args:
-        redis_stream_key: Base Redis stream key (e.g., room name from config). Will use {key}:subsampled for video frames and {key}:logs for logs.
-        redis_host: Redis server host.
-        redis_port: Redis server port.
-        instructions: List of monitoring instructions to check (from room config).
-        base_url: Base URL of the OpenAI-compatible endpoint.
-        api_key: API key for the endpoint.
-        model_name: Model name to use for inference (from room config).
-        num_frames_to_process: Number of frames to analyze when there is no previous window.
-        api_mode: "chat" (Chat Completions) or "responses" (Responses API).
-        redis_password: Redis password (None for servers without auth).
-        motion_threshold: Pixel-difference threshold for motion gating/compression (0 = off).
-        min_interval_seconds: Minimum seconds between model calls (rate floor).
-        max_interval_seconds: Heartbeat ceiling — analyze at least this often even without motion.
-        subsampled_stream_maxlen: Cap on frames fetched for catch-up (must cover max_interval).
+        room_name: Room name (Redis key base).
+        cameras: The room's cameras (each with its own uri-independent knobs).
+        instructions: Natural-language rules the model checks against.
+        base_url / api_key / model_name / api_mode: LLM endpoint settings.
+        num_frames_to_process: Room-level default frames per window.
+        redis_host / redis_port / redis_password: external Redis connection.
+        min_interval_seconds: Room-wide minimum seconds between model calls.
+        max_interval_seconds: Heartbeat — analyze at least this often without motion.
     """
-    # Initialize Redis stream handler
     redis_handler = RedisStreamHandler(
         redis_host=redis_host,
         redis_port=redis_port,
         redis_password=redis_password,
     )
 
-    # Initialize Watcher
     nanny_watcher = Watcher(
         instructions=instructions,
         model_name=model_name,
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
-        motion_metric=motion_metric,
-        motion_threshold=motion_threshold,
-        night_saturation_threshold=night_saturation_threshold,
     )
 
-    # Subsampled stream key
-    keys = room_keys(redis_stream_key)
-    subsampled_key = keys["subsampled"]
-    logs_key = keys["logs"]
+    logs_key = room_keys(room_name)["logs"]
+    subsampled_keys = {
+        cam.name: camera_keys(room_name, cam.name)["subsampled"] for cam in cameras
+    }
     logger.info(
         "Starting Watcher monitoring Redis",
-        video_queue_key=subsampled_key,
+        room=room_name,
+        cameras=[cam.name for cam in cameras],
         logs_queue_key=logs_key,
-        motion_threshold=motion_threshold,
-        motion_metric=motion_metric,
         min_interval_seconds=min_interval_seconds,
         max_interval_seconds=max_interval_seconds,
     )
     logger.info("Using model", model_name=model_name, base_url=base_url, api_mode=api_mode)
     logger.info("Monitoring instructions", instructions=instructions)
 
-    # Motion-gating state. The baseline is the last frame of the last window that
-    # was *successfully* analyzed, so a failed call is retried next cycle.
-    last_analyzed_frame_data = None
-    last_analyzed_ts = None
-    last_call_monotonic = None
+    # Per-camera gate state. A baseline is the last frame of the last *successfully*
+    # analyzed window for that camera, so a failed call is retried next cycle.
+    state = {cam.name: {"frame_data": None, "ts": None} for cam in cameras}
+    last_call_monotonic: float | None = None
 
     # Recent alert verdicts, for debouncing the beep (a single flip is ignored).
     recent_verdicts: list[tuple[bool, float]] = []
@@ -149,67 +133,103 @@ def run_watcher(
 
     try:
         while True:
-            latest = redis_handler.get_latest_frames(subsampled_key, 1)
-            if not latest:
+            now_monotonic = time.monotonic()
+
+            # Gather each camera's newest frame and evaluate its own motion gate.
+            newest = {}
+            any_gate_open = False
+            for cam in cameras:
+                latest = redis_handler.get_latest_frames(subsampled_keys[cam.name], 1)
+                if not latest:
+                    continue
+                newest[cam.name] = latest[0]
+                if should_analyze(
+                    latest[0].frame_data,
+                    state[cam.name]["frame_data"],
+                    now_monotonic,
+                    last_call_monotonic,
+                    cam.motion_threshold,
+                    min_interval_seconds,
+                    max_interval_seconds,
+                    cam.motion_metric,
+                ):
+                    any_gate_open = True
+
+            if not newest:
                 logger.warning(
-                    "No frames available in stream", video_queue_key=subsampled_key
+                    "No frames available in any camera stream", room=room_name
                 )
                 time.sleep(NO_FRAMES_SLEEP_SECONDS)
                 continue
 
-            newest_frame = latest[0]
-            now_monotonic = time.monotonic()
-
-            if not should_analyze(
-                newest_frame.frame_data,
-                last_analyzed_frame_data,
-                now_monotonic,
-                last_call_monotonic,
-                motion_threshold,
-                min_interval_seconds,
-                max_interval_seconds,
-                motion_metric,
-            ):
+            # Apply the room-wide rate floor here, outside the per-camera OR, so a
+            # camera with no baseline can't bypass it (should_analyze returns True
+            # before the floor check when the baseline is missing).
+            floor_elapsed = last_call_monotonic is None or (
+                now_monotonic - last_call_monotonic >= min_interval_seconds
+            )
+            if not any_gate_open or not floor_elapsed:
                 time.sleep(WATCHER_POLL_SECONDS)
                 continue
 
-            # Gate is open: collect the window. With a baseline, catch up on
-            # everything since it (so no gap goes unexamined); otherwise take the
-            # newest N frames.
-            if last_analyzed_ts is not None:
-                frames = redis_handler.get_frames_since(
-                    subsampled_key, last_analyzed_ts, max_count=subsampled_stream_maxlen
-                )
-                if frames and frames[0].timestamp > last_analyzed_ts:
-                    logger.warning(
-                        "Subsampled stream does not cover the full gap since the last "
-                        "analysis; increase subsampled_stream_maxlen",
-                        needed=max_interval_seconds,
-                        maxlen=subsampled_stream_maxlen,
+            # Gate is open: fetch every camera's window so the merged request is a
+            # coherent room snapshot. With a baseline, catch up since it (no gap
+            # skipped); otherwise take the newest N frames.
+            windows: list[CameraWindow] = []
+            motion_scores: dict[str, float | None] = {}
+            for cam in cameras:
+                if cam.name not in newest:
+                    continue
+                key = subsampled_keys[cam.name]
+                if state[cam.name]["ts"] is not None:
+                    frames = redis_handler.get_frames_since(
+                        key,
+                        state[cam.name]["ts"],
+                        max_count=cam.subsampled_stream_maxlen,
                     )
-            else:
-                frames = redis_handler.get_latest_frames(
-                    subsampled_key, num_frames_to_process
+                    if frames and frames[0].timestamp > state[cam.name]["ts"]:
+                        logger.warning(
+                            "Subsampled stream does not cover the full gap since the "
+                            "last analysis; increase subsampled_stream_maxlen",
+                            camera=cam.name,
+                            needed=max_interval_seconds,
+                            maxlen=cam.subsampled_stream_maxlen,
+                        )
+                else:
+                    frames = redis_handler.get_latest_frames(
+                        key, cam.num_frames_to_process or num_frames_to_process
+                    )
+                if not frames:
+                    frames = [newest[cam.name]]
+
+                motion_scores[cam.name] = (
+                    frame_diff_score(
+                        state[cam.name]["frame_data"],
+                        newest[cam.name].frame_data,
+                        cam.motion_metric,
+                    )
+                    if state[cam.name]["frame_data"] is not None
+                    else None
+                )
+                windows.append(
+                    CameraWindow(
+                        frames=frames,
+                        name=cam.name,
+                        motion_metric=cam.motion_metric,
+                        motion_threshold=cam.motion_threshold,
+                        night_threshold=cam.night_saturation_threshold,
+                    )
                 )
 
-            if not frames:
-                frames = [newest_frame]
-
-            motion_score = (
-                frame_diff_score(
-                    last_analyzed_frame_data, newest_frame.frame_data, motion_metric
-                )
-                if last_analyzed_frame_data is not None
-                else None
-            )
             logger.info(
-                "Analyzing frames from stream",
-                num_frames=len(frames),
-                motion_score=motion_score,
+                "Analyzing cameras",
+                cameras=[w.name for w in windows],
+                num_frames={w.name: len(w.frames) for w in windows},
+                motion_scores=motion_scores,
             )
 
             last_call_monotonic = time.monotonic()
-            result = nanny_watcher.process_frames(frames)
+            result = nanny_watcher.process_room(windows)
 
             if result["success"]:
                 alert_status = (
@@ -218,41 +238,47 @@ def run_watcher(
                     else "✅ No alert needed"
                 )
                 awareness = result["recommended_awareness_level"]
+                night_mode = bool(result.get("night_mode"))
 
                 logger.info(
                     "Alert status and reasoning",
                     alert_status=alert_status,
                     awareness_level=awareness,
+                    night_mode=night_mode,
                     reasoning=result["reasoning"],
                     images_sent=result.get("images_sent"),
                     frames_skipped=result.get("frames_skipped"),
                 )
 
-                # Stream logs back to Redis
-                night_mode = bool(result.get("night_mode"))
-                log_data = {
+                # Stream the verdict + a representative thumbnail per camera.
+                log_data: dict = {
                     "timestamp": time.time(),
                     "should_alert": int(result["should_alert"]),
                     "awareness_level": awareness,
                     "reasoning": result["reasoning"],
                     "night_mode": int(night_mode),
-                    # Representative frame (last of the window) for human review in
-                    # the timeline; stored as a small thumbnail to bound stream size.
-                    "frame_timestamp": frames[-1].timestamp.isoformat(),
                 }
-                thumbnail = encode_thumbnail(frames[-1].frame_data)
-                if thumbnail is not None:
-                    log_data["frame"] = thumbnail
+                for window in windows:
+                    last_frame = window.frames[-1]
+                    thumb_field = "frame" if window.name is None else f"frame__{window.name}"
+                    ts_field = (
+                        "frame_timestamp"
+                        if window.name is None
+                        else f"frame_timestamp__{window.name}"
+                    )
+                    log_data[ts_field] = last_frame.timestamp.isoformat()
+                    thumbnail = encode_thumbnail(last_frame.frame_data)
+                    if thumbnail is not None:
+                        log_data[thumb_field] = thumbnail
                 redis_handler.add_logs(logs_key, log_data)
 
-                # Advance the baseline only on success.
-                last_analyzed_frame_data = bytes(frames[-1].frame_data)
-                last_analyzed_ts = frames[-1].timestamp
+                # Advance every contributing camera's baseline (only on success).
+                for window in windows:
+                    state[window.name]["frame_data"] = bytes(window.frames[-1].frame_data)
+                    state[window.name]["ts"] = window.frames[-1].timestamp
 
-                # Debounce the alert action: only beep once a violation is
-                # confirmed by two consecutive positive verdicts (leading edge).
-                # In night-vision mode, be less sensitive: only a HIGH-confidence
-                # violation beeps (LOW/MEDIUM are still logged).
+                # Debounce the beep; in night-vision mode only a HIGH-confidence
+                # violation qualifies (LOW/MEDIUM are still logged).
                 alert_worthy = is_alert_worthy(
                     result["should_alert"], night_mode, awareness
                 )
@@ -263,14 +289,9 @@ def run_watcher(
             else:
                 error_msg = result.get("error", "Unknown error")
                 logger.error("Error processing frames", error=error_msg)
-
-                # Stream error to Redis
-                error_data = {
-                    "timestamp": time.time(),
-                    "error": error_msg,
-                }
-                redis_handler.add_logs(logs_key, error_data)
-
+                redis_handler.add_logs(
+                    logs_key, {"timestamp": time.time(), "error": error_msg}
+                )
                 time.sleep(NO_FRAMES_SLEEP_SECONDS)
 
     except KeyboardInterrupt:
@@ -294,28 +315,21 @@ if __name__ == "__main__":
     args = parse_args()
 
     try:
-        # Load room configuration from file
         room_config = load_room_config_file(args.config_file)
         config_file_path = Path(args.config_file)
         logger.info(
             f"Loaded configuration for room: {room_config.name}",
             config_file=str(config_file_path.resolve()),
+            cameras=[cam.name for cam in room_config.cameras],
         )
 
-        # Extract parameters from config
-        redis_stream_key = room_config.name
-        instructions = room_config.instructions
-        num_frames_to_process = room_config.num_frames_to_process
-
-        # Ensure instructions are provided, as RoomConfig defaults to an empty list if not in YAML.
-        if not instructions:
+        if not room_config.instructions:
             logger.error(
                 "The 'instructions' list is empty or missing in the configuration file. At least one instruction is required for the watcher.",
                 config_file=str(config_file_path.resolve()),
             )
             exit(1)
 
-        # Ensure the LLM endpoint settings are present.
         missing_env = [
             name
             for name, value in (
@@ -334,22 +348,19 @@ if __name__ == "__main__":
             exit(1)
 
         run_watcher(
-            redis_stream_key=redis_stream_key,
-            redis_host=REDIS_HOST,
-            redis_port=REDIS_PORT,
-            instructions=instructions,
+            room_name=room_config.name,
+            cameras=room_config.cameras,
+            instructions=room_config.instructions,
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
             model_name=LLM_MODEL_NAME,
-            num_frames_to_process=num_frames_to_process,
+            num_frames_to_process=room_config.num_frames_to_process,
+            redis_host=REDIS_HOST,
+            redis_port=REDIS_PORT,
             api_mode=LLM_API_MODE,
             redis_password=REDIS_PASSWORD,
-            motion_metric=room_config.motion_metric,
-            motion_threshold=room_config.motion_threshold,
-            night_saturation_threshold=room_config.night_saturation_threshold,
             min_interval_seconds=room_config.min_interval_seconds,
             max_interval_seconds=room_config.max_interval_seconds,
-            subsampled_stream_maxlen=room_config.subsampled_stream_maxlen,
         )
     except FileNotFoundError:
         logger.error(f"Configuration file not found: {args.config_file}")

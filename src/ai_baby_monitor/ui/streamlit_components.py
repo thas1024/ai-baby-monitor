@@ -6,7 +6,7 @@ import streamlit as st
 from PIL import Image
 
 from ai_baby_monitor.i18n import t
-from ai_baby_monitor.keys import room_keys
+from ai_baby_monitor.keys import camera_keys
 from ai_baby_monitor.stream import RedisStreamHandler
 
 
@@ -39,10 +39,17 @@ def display_sidebar(
             st.markdown(f"- {instruction}")
         st.divider()
         with st.expander(t("camera_details")):
-            st.caption(t("camera_uri", uri=selected_config.camera_uri))
-            st.caption(t("frame_width", value=selected_config.frame_width))
-            st.caption(t("frame_height", value=selected_config.frame_height))
-            st.caption(t("subsample_rate", value=selected_config.subsample_rate))
+            for camera in selected_config.cameras:
+                label = camera.name or t("camera_default")
+                st.caption(t("camera_uri_line", camera=label, uri=camera.uri))
+                st.caption(
+                    t(
+                        "camera_geometry",
+                        w=camera.frame_width,
+                        h=camera.frame_height,
+                        rate=camera.subsample_rate,
+                    )
+                )
         st.divider()
         with st.expander(t("llm_model_expander")):
             st.caption(t("llm_model_caption", model=os.getenv("LLM_MODEL_NAME")))
@@ -59,17 +66,28 @@ def get_cached_redis_handler(
     )
 
 
-def get_last_image_with_timestamp(
-    redis_handler: RedisStreamHandler, room_name: str
-) -> tuple[Image.Image | None, dt.datetime | None]:
-    frames = redis_handler.get_latest_frames(room_keys(room_name)["realtime"], count=1)
-
-    if not frames:
+def _open_image(frame_data) -> Image.Image | None:
+    try:
+        return Image.open(io.BytesIO(bytes(frame_data)))
+    except Exception:
         return None
 
-    jpeg_bytes = bytes(frames[0].frame_data)
-    image = Image.open(io.BytesIO(jpeg_bytes))
-    return image, frames[0].timestamp
+
+def get_camera_images(
+    redis_handler: RedisStreamHandler, room_name: str, cameras
+) -> list[tuple[str, Image.Image | None, dt.datetime | None]]:
+    """Latest realtime frame per camera: list of ``(label, image, timestamp)``."""
+    results = []
+    for camera in cameras:
+        label = camera.name or t("camera_default")
+        frames = redis_handler.get_latest_frames(
+            camera_keys(room_name, camera.name)["realtime"], count=1
+        )
+        if frames:
+            results.append((label, _open_image(frames[0].frame_data), frames[0].timestamp))
+        else:
+            results.append((label, None, None))
+    return results
 
 
 def fetch_logs(
@@ -77,6 +95,8 @@ def fetch_logs(
     room_name: str,
     num_logs: int = 3,
 ) -> list[dict]:
+    from ai_baby_monitor.keys import room_keys
+
     logs = redis_handler.get_latest_logs(room_keys(room_name)["logs"], count=num_logs)
 
     new_logs = []
@@ -84,15 +104,21 @@ def fetch_logs(
         log_data = redis_handler.deserialize_log(log_data)
         log_data["timestamp"] = dt.datetime.fromtimestamp(float(log_data["timestamp"]))
 
-        # Turn the stored thumbnail bytes into a displayable image.
-        frame_bytes = log_data.get("frame")
-        if isinstance(frame_bytes, (bytes, bytearray)) and frame_bytes:
-            try:
-                log_data["image"] = Image.open(io.BytesIO(frame_bytes))
-            except Exception:
-                log_data["image"] = None
-        else:
-            log_data["image"] = None
+        # Collect the representative photo(s). Legacy single-camera uses `frame`;
+        # multi-camera rooms use `frame__{camera}` — show every one, labeled.
+        images: list[tuple[str | None, Image.Image]] = []
+        if isinstance(log_data.get("frame"), (bytes, bytearray)):
+            image = _open_image(log_data["frame"])
+            if image is not None:
+                images.append((None, image))
+        for key in sorted(log_data):
+            if key.startswith("frame__"):
+                raw = log_data[key]
+                if isinstance(raw, (bytes, bytearray)):
+                    image = _open_image(raw)
+                    if image is not None:
+                        images.append((key[len("frame__") :], image))
+        log_data["images"] = images
 
         new_logs.append(log_data)
 
@@ -121,7 +147,7 @@ def _colored_level(level: str) -> str:
 def render_logs(logs: list[dict]):
     """Render the logs as a timeline, newest first, each entry collapsible.
 
-    Every entry carries its representative photo; the only difference is that
+    Every entry carries its representative photo(s); the only difference is that
     anomalous entries (an alert, or MEDIUM/HIGH awareness) default to expanded,
     while normal ones default to collapsed.
     """
@@ -141,11 +167,12 @@ def render_logs(logs: list[dict]):
             header += f" · 🌙 {t('night_mode_short')}"
 
         with st.expander(header, expanded=_is_anomalous(log)):
-            image = log.get("image")
-            if image is not None:
-                st.image(image, use_container_width=True)
+            images = log.get("images") or []
+            if images:
+                for camera, image in images:
+                    if camera:
+                        st.caption(t("camera_photo_label", camera=camera))
+                    st.image(image, use_container_width=True)
             else:
                 st.caption(t("no_photo"))
-            if log.get("frame_timestamp"):
-                st.caption(t("frame_time", ts=log["frame_timestamp"]))
             st.write(t("reasoning", reasoning=log.get("reasoning", "")))

@@ -386,3 +386,57 @@ def test_process_frames_reports_night_mode():
     content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     annotation = content[0]["text"]
     assert "夜视" in annotation or "night-vision" in annotation
+
+
+# --- multi-camera (process_room) ---
+
+def test_process_room_merges_cameras_with_labels():
+    from ai_baby_monitor.watcher import CameraWindow
+
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    windows = [
+        CameraWindow(frames=[_frame_with(_real_jpeg(1))], name="closeup", motion_threshold=0.0),
+        CameraWindow(frames=[_frame_with(_real_jpeg(2))], name="wide", motion_threshold=0.0),
+    ]
+    result = watcher.process_room(windows)
+
+    assert result["success"] is True
+    assert result["images_sent"] == 2  # one changed frame per camera
+
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    texts = " ".join(p["text"] for p in content if p["type"] == "text")
+    assert "closeup" in texts
+    assert "wide" in texts
+    image_parts = [p for p in content if p["type"] == "image_url"]
+    assert len(image_parts) == 2
+
+
+def test_process_room_ignores_empty_windows():
+    from ai_baby_monitor.watcher import CameraWindow
+
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    result = watcher.process_room(
+        [
+            CameraWindow(frames=[], name="closeup"),
+            CameraWindow(frames=[_frame_with(_real_jpeg(1))], name="wide", motion_threshold=0.0),
+        ]
+    )
+    assert result["success"] is True
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    texts = " ".join(p["text"] for p in content if p["type"] == "text")
+    assert "closeup" not in texts  # empty camera contributes nothing
+    assert "wide" in texts
+
+
+def test_process_room_all_empty_returns_error():
+    from ai_baby_monitor.watcher import CameraWindow
+
+    watcher = Watcher(instructions=["Test"])
+    result = watcher.process_room([CameraWindow(frames=[], name="a")])
+    assert result["success"] is False

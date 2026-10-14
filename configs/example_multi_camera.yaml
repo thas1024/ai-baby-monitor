@@ -1,0 +1,39 @@
+# Example: a room with TWO camera angles. Copy/rename and point the uris at your
+# cameras. Each camera name is used to label the images in the prompt and to
+# scope its Redis streams: ai_baby_monitor:<room>:<camera>:subsampled
+#
+# One capture process per camera:
+#   uv run scripts/stream_to_redis.py --config-file configs/example_multi_camera.yaml --camera closeup
+#   uv run scripts/stream_to_redis.py --config-file configs/example_multi_camera.yaml --camera wide
+# (or one compose service per --camera; see docker-compose.yml).
+
+name: "nursery"
+
+# Room-level knobs (shared by all cameras of this room).
+min_interval_seconds: 10.0   # minimum seconds between model calls
+max_interval_seconds: 30.0   # heartbeat: analyze at least this often even with no motion
+num_frames_to_process: 16    # default window size (per-camera override below)
+
+instructions:
+  - "宝宝不能做任何危险的动作。"
+  - "如果宝宝醒着，房间里必须有大人在场。"
+
+cameras:
+  # Close-up of the baby: full frame rate, sensitive to small motion.
+  - name: closeup
+    uri: "rtsp://user:pass@CAMERA1_IP:554/Streaming/Channels/101"
+    # motion_metric: grid_max          # catches small localized motion a whole-frame mean misses
+    # motion_threshold: 6.0
+    # subsample_rate: 4
+    # frame_width: 640
+    # frame_height: 360
+    # subsampled_stream_maxlen: 128    # must cover max_interval_seconds at the subsample rate
+
+  # Whole-room wide angle: sample less, higher motion threshold.
+  - name: wide
+    uri: "rtsp://user:pass@CAMERA2_IP:554/Streaming/Channels/101"
+    # subsample_rate: 8
+    # frame_width: 640
+    # frame_height: 360
+    # motion_threshold: 4.0
+    # num_frames_to_process: 8

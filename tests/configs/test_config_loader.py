@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ai_baby_monitor.config import RoomConfig, load_room_config_file
+from ai_baby_monitor.config import CameraConfig, RoomConfig, load_room_config_file
 
 
 def test_load_room_config_file_with_optional_fields(tmp_path: Path):
@@ -83,7 +83,7 @@ def test_camera_uri_missing_env_var_raises(tmp_path: Path, monkeypatch):
 
 
 def test_motion_settings_defaults():
-    config = RoomConfig(name="r", camera_uri="0")
+    config = RoomConfig(name="r", cameras=[CameraConfig(name=None, uri="0")])
     assert config.motion_metric == "mean"
     assert config.motion_threshold is None  # None -> metric default
     assert config.min_interval_seconds == 10.0
@@ -108,3 +108,71 @@ def test_motion_settings_from_yaml(tmp_path: Path):
     assert config.motion_threshold == 5.5
     assert config.min_interval_seconds == 20
     assert config.max_interval_seconds == 120
+
+
+# --- multi-camera ---
+
+def test_multiple_cameras_from_yaml(tmp_path: Path):
+    sample = {
+        "name": "nursery",
+        "min_interval_seconds": 15,
+        "cameras": [
+            {"name": "closeup", "uri": "rtsp://cam1", "frame_width": 640},
+            {"name": "wide", "uri": "rtsp://cam2", "subsample_rate": 8},
+        ],
+        "instructions": ["no climbing"],
+    }
+    config_path = tmp_path / "nursery.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+
+    config = load_room_config_file(config_path)
+    assert [c.name for c in config.cameras] == ["closeup", "wide"]
+    assert config.cameras[0].uri == "rtsp://cam1"
+    assert config.cameras[0].frame_width == 640
+    assert config.cameras[1].subsample_rate == 8
+    assert config.min_interval_seconds == 15
+    # Delegating properties reflect the first camera.
+    assert config.camera_uri == "rtsp://cam1"
+
+
+def test_both_camera_and_cameras_raises(tmp_path: Path):
+    sample = {"name": "r", "camera": {"uri": "0"}, "cameras": [{"name": "a", "uri": "1"}]}
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    with pytest.raises(ValueError, match="not both"):
+        load_room_config_file(config_path)
+
+
+def test_invalid_camera_name_raises(tmp_path: Path):
+    sample = {"name": "r", "cameras": [{"name": "bad name!", "uri": "0"}]}
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    with pytest.raises(ValueError, match="Invalid camera name"):
+        load_room_config_file(config_path)
+
+
+def test_duplicate_camera_names_raise(tmp_path: Path):
+    sample = {
+        "name": "r",
+        "cameras": [{"name": "a", "uri": "0"}, {"name": "a", "uri": "1"}],
+    }
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    with pytest.raises(ValueError, match="unique"):
+        load_room_config_file(config_path)
+
+
+def test_per_camera_frames_fall_back_to_room_default(tmp_path: Path):
+    sample = {
+        "name": "r",
+        "num_frames_to_process": 12,
+        "cameras": [
+            {"name": "a", "uri": "0"},
+            {"name": "b", "uri": "1", "num_frames_to_process": 4},
+        ],
+    }
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    config = load_room_config_file(config_path)
+    assert config.num_frames_for(config.cameras[0]) == 12
+    assert config.num_frames_for(config.cameras[1]) == 4

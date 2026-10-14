@@ -1,4 +1,4 @@
-from ai_baby_monitor.keys import KEY_PREFIX, room_keys
+from ai_baby_monitor.keys import KEY_PREFIX, camera_keys, room_keys
 
 
 def test_room_keys_prefixed():
@@ -13,3 +13,20 @@ def test_room_keys_prefixed():
 
 def test_room_keys_distinct_per_room():
     assert room_keys("a")["logs"] != room_keys("b")["logs"]
+
+
+
+def test_camera_keys_scoped_when_named():
+    keys = camera_keys("living_room", "closeup")
+    assert keys == {
+        "realtime": "ai_baby_monitor:living_room:closeup:realtime",
+        "subsampled": "ai_baby_monitor:living_room:closeup:subsampled",
+    }
+
+
+def test_camera_keys_unscoped_when_unnamed():
+    keys = camera_keys("living_room", None)
+    assert keys == {
+        "realtime": "ai_baby_monitor:living_room:realtime",
+        "subsampled": "ai_baby_monitor:living_room:subsampled",
+    }

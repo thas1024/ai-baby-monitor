@@ -45,11 +45,12 @@ There is no linter/formatter config in the repo. Tests are `pytest`, all mock-ba
 
 ## Architecture
 
-Three per-room Redis streams, all built by `keys.room_keys(room_name)` (`src/ai_baby_monitor/keys.py`) — this is the contract between the three scripts, which all address the same keys via that helper:
+A room has **one or more cameras** (angles). Frame streams are per camera
+(`keys.camera_keys(room, camera)`); the logs stream is per room:
 
-- `ai_baby_monitor:{room}:realtime` — last 3 frames, `approximate=False`; read by the Streamlit viewer for the live image.
-- `ai_baby_monitor:{room}:subsampled` — every Nth frame (`subsample_rate`), capped at `subsampled_stream_maxlen`; read by the watcher in batches of `num_frames_to_process`.
-- `ai_baby_monitor:{room}:logs` — watcher results (`should_alert`, `awareness_level`, `reasoning`, `night_mode`) plus a representative-frame **thumbnail** (`frame`, binary JPEG) and error records (`{timestamp, error}`); read by the viewer. `render_logs` handles both shapes and shows a timeline. `deserialize_log` keeps `frame` as bytes (text fields are decoded).
+- `ai_baby_monitor:{room}:{camera}:realtime` — last 3 frames, `approximate=False`; read by the viewer. An **unnamed legacy camera omits `{camera}`** (`ai_baby_monitor:{room}:realtime`) so old deployments don't move keys.
+- `ai_baby_monitor:{room}:{camera}:subsampled` — every Nth frame (`subsample_rate`), capped at `subsampled_stream_maxlen`; read by the watcher.
+- `ai_baby_monitor:{room}:logs` — one room-level timeline: the merged verdict (`should_alert`, `awareness_level`, `reasoning`, `night_mode`) plus a representative-frame **thumbnail per camera** (`frame` for a legacy single camera, `frame__{camera}` for named ones) and error records (`{timestamp, error}`). `render_logs` shows a timeline; `deserialize_log` keeps `frame`/`frame__*` as bytes.
 
 Data flow: `CameraStream` grabs a frame → JPEG-encodes it into a `Frame(frame_data: np.ndarray, timestamp, frame_idx)` → `RedisStreamHandler` stores raw bytes → the watcher deserializes and sends each frame as its own `image_url` content part (`data:image/jpeg;base64,...`) alongside the instructions text.
 
@@ -75,11 +76,11 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 - `build_timeline(frames, threshold, metric, night_threshold)` — the first frame is always an image anchor; later frames are compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A **color↔night-vision switch** emits a `ModeTransitionItem` and re-anchors to the new mode, so a run of grayscale frames is compared against each other instead of the pre-switch color anchor (which would otherwise mark them all "changed"). `ImageItem.night` marks night frames. A window always yields ≥1 image.
 - `should_analyze(...)` — the cycle gate: call when the newest frame differs from the last analyzed frame, or when the heartbeat (`max_interval_seconds`) elapses, floored by `min_interval_seconds`. `threshold <= 0` or no baseline → always call.
 
-`Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation — with a `夜视/红外模式` marker when `night`; skipped runs and mode switches become text notes with no image). `_request` maps parts to chat/responses content. `run_watcher.py` holds the gate state:
+`Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation — with a `夜视/红外模式` marker when `night`; skipped runs and mode switches become text notes with no image). `_request` maps parts to chat/responses content. For multi-camera rooms, `process_room([CameraWindow, ...])` emits a `[camera: NAME]` header plus per-frame `[NAME · frame N @ …]` annotations, merging all cameras into one request; `process_frames(frames)` is a single-camera wrapper. `run_watcher.py` holds the gate state:
 
-- baseline = the last frame of the last **successful** window (a failed call is retried next cycle);
-- interval timing uses `time.monotonic()`, not frame timestamps;
-- when the gate opens it fetches frames **since the last analyzed window** (`RedisStreamHandler.get_frames_since`) so no gap is skipped — capped by `subsampled_stream_maxlen`, and it warns if that cap truncates the gap.
+- **per-camera** baselines (last frame of the last **successful** window), plus a **single** shared `last_call_monotonic` (the heartbeat is room-wide);
+- each cycle skips cameras with no frames; the model is called if **any** camera's gate opens **and** the room-wide `min_interval_seconds` floor has elapsed — the floor is applied in the loop, outside the per-camera OR, so a camera with no baseline can't bypass it;
+- on a call a window is fetched for **every** camera (since its own baseline) so the merged snapshot is coherent; `night_mode` = ALL cameras night (desensitize only on pure IR); on success every camera's baseline advances, on failure none does.
 
 The alert **action** is debounced (`src/ai_baby_monitor/alerts.py` `should_emit_alert`): the beep only fires on the leading edge of a violation confirmed by two consecutive positive verdicts within `min(1800, max(300, max_interval_seconds*3))` seconds. It is also gated by `is_alert_worthy`: in **night-vision mode** only a HIGH-confidence violation qualifies (grayscale/IR frames are noisier), so LOW/MEDIUM alerts are logged but do not beep. Every verdict is still written to `:logs` (with a `night_mode` flag) — only the beep is debounced/desensitized.
 
@@ -104,13 +105,13 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 ### Config
 
-`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. Required top-level keys: `name`, `camera.uri`, `instructions`. Optional camera keys (`subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `num_frames_to_process`, `motion_metric`, `motion_threshold`, `night_saturation_threshold`, `min_interval_seconds`, `max_interval_seconds`) fall back to dataclass defaults when absent — the loader only passes keys present in the YAML. `camera_uri` is a string in YAML ("0" for webcam index, or an RTSP URL); `stream_to_redis.py` converts all-digit URIs to `int`. The motion knobs are per-room (cameras differ); see "Motion gating & request throttling".
+`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. A room has either a legacy single `camera:` mapping or a `cameras:` list (one `CameraConfig` per angle); specifying both raises. Room-level keys: `name`, `instructions`, `min_interval_seconds`, `max_interval_seconds`, `num_frames_to_process`. Per-camera keys (on each `CameraConfig`, or in the legacy `camera:` block): `uri`, optional `name` (required and unique for `cameras:`, `[A-Za-z0-9_-]+`), and the optional `subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `motion_metric`, `motion_threshold`, `night_saturation_threshold`, `num_frames_to_process` (per-camera override of the room default). `RoomConfig` keeps read-only delegating properties (`camera_uri`, `motion_metric`, …) to the first camera for legacy consumers. `camera_uri` is a string ("0" webcam index or an RTSP URL); `${VAR}` is expanded from the environment. `stream_to_redis.py` converts all-digit URIs to `int`.
 
-### Adding a room (touches several places)
+### Adding a room or camera (touches several places)
 
-1. Add `configs/{room}.yaml`.
-2. Add a `stream_to_redis` service in `docker-compose.yml` pointing at that config.
-3. Add a `watcher` service (or run `run_watcher.py` on the host) with that config.
+1. Add `configs/{room}.yaml` with a `camera:` (single) or `cameras:` (multi-angle) block.
+2. Add **one `stream_to_redis` service per camera** in `docker-compose.yml`, each with its own `--camera NAME` (omit `--camera` for a single-camera config).
+3. Add **one `watcher` service per room** (it handles all the room's cameras itself).
 4. Pass the new config to the `streamlit_viewer` `--config-files` (space-separated list).
 
 ## Docker
@@ -134,3 +135,5 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 - `motion_threshold` is not portable across cameras (AGC/IR/compression shift the noise floor). Every analyze logs `motion_score`; to calibrate, run on an empty room with gating off and set the threshold just above the idle noise. For a safety monitor, prefer false positives (lower threshold) and rely on `min_interval_seconds` for cost control.
 - `subsampled_stream_maxlen` must cover `max_interval_seconds` at the subsampled frame rate, otherwise catch-up after a long heartbeat truncates the gap; the watcher warns ("does not cover the full gap") when this happens.
 - A grayscale frame is **night-vision (IR) mode**, not a camera fault — don't treat "the picture is black-and-white" as an error. The prompt tells the model this, night frames are annotated, and in night mode only HIGH-confidence violations beep (`is_alert_worthy`). If a camera's "B&W" has a slight tint, lower `night_saturation_threshold`.
+- Multi-camera cost scales with the number of cameras × per-camera images per request (up to `num_frames_to_process` each on a first window). Keep `--limit-mm-per-prompt image=` (vLLM) above the total, and rely on per-camera `motion_threshold` (a static angle compresses to one anchor image) plus the room-level `min_interval_seconds`.
+- Migrating a room from the legacy `camera:` block to a named `cameras:` list **changes its Redis keys** (`{room}:subsampled` → `{room}:{camera}:subsampled`); no data migration is needed, just restart the producers — but an unnamed camera keeps the legacy unscoped keys.

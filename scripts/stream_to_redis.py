@@ -6,8 +6,8 @@ from pathlib import Path
 import structlog
 from dotenv import load_dotenv
 
-from ai_baby_monitor.config import load_room_config_file
-from ai_baby_monitor.keys import room_keys
+from ai_baby_monitor.config import CameraConfig, load_room_config_file
+from ai_baby_monitor.keys import camera_keys
 from ai_baby_monitor.stream import CameraStream, RedisStreamHandler
 
 logger = structlog.get_logger()
@@ -29,6 +29,7 @@ def stream_to_redis(
     frame_height: int | None,
     subsample_rate: int = 4,
     redis_password: str | None = None,
+    camera_name: str | None = None,
 ):
     """
     Stream camera frames to Redis short realtime and long subsampled queues.
@@ -45,7 +46,7 @@ def stream_to_redis(
     if frame_width is not None and frame_height is not None:
         frame_shape = (frame_width, frame_height)
 
-    logger.info("Initializing camera stream", camera_uri=camera_uri)
+    logger.info("Initializing camera stream", camera_uri=camera_uri, camera=camera_name)
     logger.info(
         "Streaming to Redis",
         redis_stream_key=redis_stream_key,
@@ -73,7 +74,7 @@ def stream_to_redis(
 
         logger.info("Starting to stream to redis.")
 
-        keys = room_keys(redis_stream_key)
+        keys = camera_keys(redis_stream_key, camera_name)
 
         # Main streaming loop
         while True:
@@ -119,6 +120,12 @@ def parse_args():
         "--config-file", required=True, help="Path to room configuration YAML file"
     )
     parser.add_argument(
+        "--camera",
+        default=None,
+        help="Which camera/angle to capture (its 'name' in the room config). "
+        "Optional for a legacy single-camera config.",
+    )
+    parser.add_argument(
         "--save-stream-path",
         default=None,
         help="Path to save the video stream (optional)",
@@ -130,6 +137,27 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def _select_camera(room_config, camera_name: str | None) -> CameraConfig:
+    """Pick the camera to capture: by ``--camera NAME``, else the only one."""
+    cameras = room_config.cameras
+    if camera_name is None:
+        if len(cameras) != 1:
+            names = [c.name for c in cameras]
+            raise ValueError(
+                f"Room '{room_config.name}' has {len(cameras)} cameras; pass --camera "
+                f"with one of {names}"
+            )
+        return cameras[0]
+
+    for camera in cameras:
+        if camera.name == camera_name:
+            return camera
+    raise ValueError(
+        f"Camera '{camera_name}' not found in room '{room_config.name}'; "
+        f"available: {[c.name for c in cameras]}"
+    )
 
 
 if __name__ == "__main__":
@@ -144,28 +172,26 @@ if __name__ == "__main__":
             config_file=str(config_file_path.resolve()),
         )
 
-        # Extract camera settings from config
-        camera_uri = room_config.camera_uri
+        # Select the camera/angle this process captures.
+        camera = _select_camera(room_config, args.camera)
 
-        # Override with demo if requested
+        camera_uri = camera.uri
         if args.demo:
             camera_uri = "assets/demo/demo.mp4"
             logger.info("Using demo video source", camera_uri=camera_uri)
 
-        # Use the room name as the redis stream key
-        redis_stream_key = room_config.name
-
         stream_to_redis(
             camera_uri=camera_uri,
-            redis_stream_key=redis_stream_key,
+            redis_stream_key=room_config.name,
             redis_host=REDIS_HOST,
             redis_port=REDIS_PORT,
-            subsampled_stream_maxlen=room_config.subsampled_stream_maxlen,
+            subsampled_stream_maxlen=camera.subsampled_stream_maxlen,
             save_stream_path=args.save_stream_path,
-            frame_width=room_config.frame_width,
-            frame_height=room_config.frame_height,
-            subsample_rate=room_config.subsample_rate,
+            frame_width=camera.frame_width,
+            frame_height=camera.frame_height,
+            subsample_rate=camera.subsample_rate,
             redis_password=REDIS_PASSWORD,
+            camera_name=camera.name,
         )
     except Exception as e:
         logger.error("Failed to start streaming", error=e)

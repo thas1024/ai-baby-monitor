@@ -74,22 +74,28 @@ class RedisStreamHandler:
             logger.error("Error deserializing frame", error=e)
             return None
 
-    # Log fields that hold raw binary (a JPEG thumbnail), not UTF-8 text.
-    _BINARY_LOG_FIELDS = frozenset({"frame", "frame_bytes"})
+    @staticmethod
+    def _is_binary_log_field(key: str) -> bool:
+        """Whether a log field holds raw binary (a JPEG) rather than UTF-8 text.
+
+        Covers the legacy ``frame`` field and the per-camera ``frame__{camera}``
+        fields used by multi-camera rooms.
+        """
+        return key in ("frame", "frame_bytes") or key.startswith("frame__")
 
     @staticmethod
     def deserialize_log(log_data: dict) -> dict:
         """Deserialize a log from Redis data.
 
         Text fields are decoded to ``str``; binary fields (the representative
-        frame JPEG) are kept as ``bytes`` — decoding them as UTF-8 would corrupt
+        frame JPEGs) are kept as ``bytes`` — decoding them as UTF-8 would corrupt
         or raise on the image data.
         """
         new_log_data = {}
         for key, value in log_data.items():
             if isinstance(key, bytes):
                 key = key.decode("utf-8")
-            if isinstance(value, bytes) and key not in RedisStreamHandler._BINARY_LOG_FIELDS:
+            if isinstance(value, bytes) and not RedisStreamHandler._is_binary_log_field(key):
                 value = value.decode("utf-8")
             new_log_data[key] = value
         return new_log_data

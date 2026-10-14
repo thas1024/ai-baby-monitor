@@ -88,7 +88,7 @@ def test_render_logs_shows_photo_when_present():
                     "timestamp": "1",
                     "should_alert": "1",
                     "awareness_level": "HIGH",
-                    "image": MagicMock(name="pil_image"),
+                    "images": [("closeup", MagicMock(name="pil_image"))],
                 }
             ]
         )
@@ -96,3 +96,25 @@ def test_render_logs_shows_photo_when_present():
         patcher.stop()
 
     assert mock_st.image.called
+
+
+def test_render_logs_shows_multiple_camera_photos():
+    patcher, mock_st = _patch_st()
+    try:
+        sc.render_logs(
+            [
+                {
+                    "timestamp": "1",
+                    "should_alert": "1",
+                    "awareness_level": "HIGH",
+                    "images": [
+                        ("closeup", MagicMock(name="img1")),
+                        ("wide", MagicMock(name="img2")),
+                    ],
+                }
+            ]
+        )
+    finally:
+        patcher.stop()
+
+    assert mock_st.image.call_count == 2

@@ -86,7 +86,8 @@ instructions:          # natural‑language rules for the nanny model
   - "An adult should be in the room if the baby is awake."
 ```
 
-* **Multiple rooms**? Edit `docker-compose.yml` and add a `stream_to_redis` and a `watcher` service per room. Pass the new room config to the streamlit viewer.
+* **Multiple rooms**? Add a `stream_to_redis` and a `watcher` service per room in `docker-compose.yml`, and pass the new room config to the streamlit viewer.
+* **Multiple cameras per room** (e.g. a close‑up of the baby plus a whole‑room wide angle)? Give the room a `cameras:` list (see `configs/example_multi_camera.yaml`), run **one `stream_to_redis` process per camera** with `--camera NAME`, and keep one `watcher` — a single request merges every angle, each image labeled with its camera, so the model judges all views together. Each camera can have its own `subsample_rate` / `motion_threshold` / frame size.
 * **Swap the model / backend**? Set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_NAME` in `.env` to point at any OpenAI‑compatible vision endpoint. Set `LLM_API_MODE=responses` to use the OpenAI Responses API instead of the default Chat Completions API. To fall back to local inference, run `docker compose --profile local up -d` and set `LLM_BASE_URL=http://localhost:8000/v1`.
 * **Cut cost / requests**? The watcher only calls the model when the picture actually changes, plus a heartbeat. Per‑room knobs (under `camera:`): `motion_metric` (`mean` / `grid_max` / `changed_fraction`), `motion_threshold` (omit for the metric default; `0` disables gating and sends every frame), `min_interval_seconds` (rate floor), `max_interval_seconds` (heartbeat). Changed frames are sent as annotated images (`[frame N @ <time>]`); unchanged runs are sent as a text note only, so a request usually carries far fewer than `num_frames_to_process` images. The alert beep is debounced to the leading edge of a confirmed violation. See "Motion gating" below.
 

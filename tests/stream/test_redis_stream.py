@@ -226,3 +226,14 @@ def test_deserialize_log_keeps_binary_frame_and_decodes_text():
     assert out["reasoning"] == "baby climbing"
     # Binary field preserved as bytes (not decoded/corrupted).
     assert out["frame"] == b"\xff\xd8\xff\xe0\x00\x10JFIF"
+
+
+def test_deserialize_log_keeps_prefixed_camera_frame_binary():
+    log_data = {
+        b"timestamp": b"1.0",
+        b"frame__closeup": b"\xff\xd8\xff\xe0\x00\x10JFIF",
+        b"frame__wide": b"\xff\xd8\xff\xe0\x00\x10JFIF2",
+    }
+    out = RedisStreamHandler.deserialize_log(log_data)
+    assert isinstance(out["frame__closeup"], bytes)
+    assert isinstance(out["frame__wide"], bytes)

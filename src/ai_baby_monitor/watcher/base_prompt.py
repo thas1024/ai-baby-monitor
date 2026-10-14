@@ -81,6 +81,17 @@ _MODE_TRANSITION_ANNOTATION = {
         "zh": "[切换到彩色模式 @ {ts}]",
     },
 }
+_CAMERA_HEADER = {
+    "en": "[camera: {camera}]",
+    "zh": "[摄像头：{camera}]",
+}
+
+
+def _prefix_camera(text: str, camera: str | None) -> str:
+    """Fold a camera name into a bracketed annotation: ``[baby · 帧1 @ …]``."""
+    if not camera or not text.startswith("["):
+        return text
+    return f"[{camera} · {text[1:]}"
 
 
 def _format_timestamp(timestamp: dt.datetime) -> str:
@@ -92,40 +103,45 @@ def format_frame_annotation(
     index: int,
     timestamp: dt.datetime,
     night: bool = False,
+    camera: str | None = None,
     language: str | None = None,
 ) -> str:
     """Annotation before a frame image, e.g. ``[帧1 @ 2026-10-14 12:00:00.000]``.
 
     When ``night`` is set, a ``夜视/红外模式`` marker is appended so the model
-    knows the grayscale picture is a night-vision frame, not a fault.
+    knows the grayscale picture is a night-vision frame, not a fault. When
+    ``camera`` is set, the camera/view name is prefixed (multi-camera rooms).
     """
     language = language or get_language()
     template = _FRAME_ANNOTATION.get(language, _FRAME_ANNOTATION["en"])
     text = template.format(index=index + 1, ts=_format_timestamp(timestamp))
     if night:
         text += _NIGHT_SUFFIX.get(language, _NIGHT_SUFFIX["en"])
-    return text
+    return _prefix_camera(text, camera)
 
 
 def format_skipped_annotation(
     count: int,
     start_ts: dt.datetime,
     end_ts: dt.datetime,
+    camera: str | None = None,
     language: str | None = None,
 ) -> str:
     """Annotation replacing a run of unchanged frames (no image is sent)."""
     language = language or get_language()
     template = _SKIPPED_ANNOTATION.get(language, _SKIPPED_ANNOTATION["en"])
-    return template.format(
+    text = template.format(
         count=count,
         start=_format_timestamp(start_ts),
         end=_format_timestamp(end_ts),
     )
+    return _prefix_camera(text, camera)
 
 
 def format_mode_transition_annotation(
     to_night: bool,
     timestamp: dt.datetime,
+    camera: str | None = None,
     language: str | None = None,
 ) -> str:
     """Annotation for a color<->night-vision switch (no image is sent)."""
@@ -134,4 +150,12 @@ def format_mode_transition_annotation(
     template = _MODE_TRANSITION_ANNOTATION[key].get(
         language, _MODE_TRANSITION_ANNOTATION[key]["en"]
     )
-    return template.format(ts=_format_timestamp(timestamp))
+    text = template.format(ts=_format_timestamp(timestamp))
+    return _prefix_camera(text, camera)
+
+
+def format_camera_header(camera: str, language: str | None = None) -> str:
+    """Header text labeling which camera a following block of frames is from."""
+    language = language or get_language()
+    template = _CAMERA_HEADER.get(language, _CAMERA_HEADER["en"])
+    return template.format(camera=camera)
