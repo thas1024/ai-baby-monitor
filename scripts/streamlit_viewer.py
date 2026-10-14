@@ -6,6 +6,7 @@ import structlog
 from dotenv import load_dotenv
 
 from ai_baby_monitor.config import load_multiple_room_configs
+from ai_baby_monitor.i18n import t
 from ai_baby_monitor.ui import (
     display_sidebar,
     fetch_logs,
@@ -36,7 +37,7 @@ def parse_args():
 
 
 st.set_page_config(
-    page_title="Baby Monitor Stream Viewer",
+    page_title=t("app_title"),
     page_icon="👶",
 )
 
@@ -45,7 +46,7 @@ if "room_configs" not in st.session_state:
     args = parse_args()
     room_configs = load_multiple_room_configs(args.config_files)
     if not room_configs:
-        st.error("No room config file was provided.")
+        st.error(t("no_room_config"))
     st.session_state["room_configs"] = room_configs
 
 redis_handler = get_cached_redis_handler(REDIS_HOST, REDIS_PORT, REDIS_PASSWORD)
@@ -59,8 +60,8 @@ display_sidebar(
 selected_config = st.session_state["selected_config"]
 selected_mode = st.session_state["selected_mode"]
 
-if selected_mode == "Real-time stream":
-    st.title("Baby Monitor Stream Viewer")
+if selected_mode == "realtime":
+    st.title(t("app_title"))
 
     # Placeholders for the stream and logs
     stream_placeholder = st.empty()
@@ -73,11 +74,11 @@ if selected_mode == "Real-time stream":
             )
             if image:
                 st.image(image, use_container_width=True)
-                with st.expander("Frame Info"):
-                    st.caption(f"Timestamp: {timestamp}")
+                with st.expander(t("frame_info")):
+                    st.caption(t("timestamp", ts=timestamp))
 
         with log_placeholder.container(height=350):
-            with st.expander("LLM Logs", expanded=True, icon="🤖"):
+            with st.expander(t("llm_logs"), expanded=True, icon="🤖"):
                 logs = fetch_logs(
                     redis_handler,
                     selected_config.name,
@@ -87,15 +88,15 @@ if selected_mode == "Real-time stream":
                 render_logs(logs)
 
 else:
-    st.title("Baby Monitor Logs Viewer")
+    st.title(t("logs_viewer_title"))
 
     num_logs = st.number_input(
-        "Number of latest logs to fetch",
+        t("num_logs_label"),
         min_value=1,
         value=100,
         step=1,
     )
-    if st.button("Fetch logs", type="primary"):
+    if st.button(t("fetch_logs_button"), type="primary"):
         logs = fetch_logs(redis_handler, selected_config.name, num_logs=num_logs)[::-1]
         with st.container(height=800):
             render_logs(logs)

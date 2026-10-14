@@ -5,6 +5,7 @@ import os
 import streamlit as st
 from PIL import Image
 
+from ai_baby_monitor.i18n import t
 from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.stream import RedisStreamHandler
 
@@ -15,34 +16,36 @@ def display_sidebar(
     mode_key: str = "selected_mode",
 ):
     with st.sidebar:
-        st.header("Room Configuration")
+        st.header(t("sidebar_header"))
 
         selected_config = st.selectbox(
-            "Select Room",
+            t("select_room"),
             options=list(st.session_state[room_configs_key].values()),
             index=0,
             key=config_key,
         )
 
+        # Options are stable mode keys; the label is translated for display.
         st.radio(
-            "Select Mode",
-            options=["Real-time stream", "Historic logs"],
+            t("select_mode"),
+            options=["realtime", "historic"],
+            format_func=lambda key: t(f"mode_{key}"),
             index=0,
             key=mode_key,
         )
 
-        st.caption("Instructions:")
+        st.caption(t("instructions_label"))
         for instruction in selected_config.instructions:
             st.markdown(f"- {instruction}")
         st.divider()
-        with st.expander("Camera details"):
-            st.caption(f"Camera URI:  {selected_config.camera_uri}")
-            st.caption(f"Frame width: {selected_config.frame_width}")
-            st.caption(f"Frame height: {selected_config.frame_height}")
-            st.caption(f"Subsample rate: {selected_config.subsample_rate}")
+        with st.expander(t("camera_details")):
+            st.caption(t("camera_uri", uri=selected_config.camera_uri))
+            st.caption(t("frame_width", value=selected_config.frame_width))
+            st.caption(t("frame_height", value=selected_config.frame_height))
+            st.caption(t("subsample_rate", value=selected_config.subsample_rate))
         st.divider()
-        with st.expander("LLM Model"):
-            st.caption(f"LLM Model: {os.getenv('LLM_MODEL_NAME')}")
+        with st.expander(t("llm_model_expander")):
+            st.caption(t("llm_model_caption", model=os.getenv("LLM_MODEL_NAME")))
 
 
 @st.cache_resource
@@ -94,23 +97,24 @@ def render_logs(logs: list[dict]):
         # ({timestamp, error}). Both must render without raising.
         if "error" in log and "should_alert" not in log:
             with st.chat_message("ai", avatar="⚠️"):
-                st.write(f"Timestamp: {timestamp}")
-                st.write(f"Error: {log['error']}")
+                st.write(t("timestamp", ts=timestamp))
+                st.write(t("error", error=log["error"]))
                 st.divider()
             continue
 
         alert_status = "🚨" if str(log.get("should_alert")) == "1" else "🟢"
-        awareness_level = log.get("awareness_level", "UNKNOWN")
-        if awareness_level == "LOW":
-            awareness_level = f":green[{awareness_level}]"
-        elif awareness_level == "MEDIUM":
-            awareness_level = f":yellow[{awareness_level}]"
+        level = log.get("awareness_level", "UNKNOWN")
+        level_label = t(f"awareness_{level}")
+        if level == "LOW":
+            level_label = f":green[{level_label}]"
+        elif level == "MEDIUM":
+            level_label = f":yellow[{level_label}]"
         else:
-            awareness_level = f":red[{awareness_level}]"
+            level_label = f":red[{level_label}]"
         reasoning = log.get("reasoning", "")
         with st.chat_message("ai"):
-            st.write(f"Timestamp: {timestamp}")
-            st.write(f"Alert status: {alert_status}")
-            st.write(f"Awareness level: {awareness_level}")
-            st.write(f"Reasoning: {reasoning}")
+            st.write(t("timestamp", ts=timestamp))
+            st.write(t("alert_status", status=alert_status))
+            st.write(t("awareness_level", level=level_label))
+            st.write(t("reasoning", reasoning=reasoning))
             st.divider()

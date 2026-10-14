@@ -5,5 +5,5 @@ camera:
   uri: "${CAMERA_URI}"
 
 instructions:
-  - "The baby shouldn't do anything dangerous."
-  - "An adult should be in the room with the baby if the baby is awake."
+  - "宝宝不能做任何危险的动作。"
+  - "如果宝宝醒着，房间里必须有大人在场。"

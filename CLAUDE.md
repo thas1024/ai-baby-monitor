@@ -66,6 +66,15 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 
 `_request` / `_build_response_format` / `_consume_response_stream` branch on `api_mode`. `_calculate_fps` is retained as a utility but is no longer used by the request path (frames are sent as individual images, not a vLLM video blob).
 
+### Localization (i18n)
+
+User-facing text is bilingual, selected by `APP_LANG` (`zh` default, or `en`).
+
+- `src/ai_baby_monitor/i18n.py` holds all UI strings as `key -> {lang: text}` tables; call `t("key", **kwargs)` (placeholders are `{name}`). Missing keys fall back to the default language, then the key itself. The enum values `LOW`/`MEDIUM`/`HIGH` stay English in storage/schema; only their display labels (`awareness_LOW`…) are translated.
+- `watcher/base_prompt.py` builds the LLM prompt per language (`get_instructions_prompt(instructions, language=...)`, defaults to `get_language()`); the `zh` prompt asks the model to answer in Chinese while keeping the JSON field names English.
+- `configs/*.yaml` sample instructions are Chinese; the streamlit mode options are stored as stable keys (`realtime`/`historic`) and translated for display via `st.radio(format_func=...)`.
+- structlog log messages and code identifiers stay English on purpose.
+
 Streamlit reads frames/logs back and renders them; the viewer loop (`while True` in `scripts/streamlit_viewer.py`) polls Redis for the newest frame and log each rerun.
 
 ### Watcher
@@ -93,7 +102,7 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 `python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It has no `depends_on` (Redis is external). `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
 
-`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, plus `VLLM_PORT` for the local profile).
+`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, plus `VLLM_PORT` for the local profile).
 
 ## Gotchas
 

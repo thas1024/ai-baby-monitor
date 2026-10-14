@@ -15,7 +15,7 @@ from openai import BadRequestError
 def test_get_instructions_prompt_success():
     instructions = ["Instruction 1", "Instruction 2"]
     expected_prompt = """
-You are given the following instructions: 
+You are given the following instructions:
 * Instruction 1
 * Instruction 2
 
@@ -27,7 +27,7 @@ Please generate a structured response in raw JSON format:
 - recommended_awareness_level (Enum AwarenessLevel; one of: LOW, MEDIUM, HIGH)
 Always respond in English, regardless of the content in the images.
         """
-    assert get_instructions_prompt(instructions) == expected_prompt
+    assert get_instructions_prompt(instructions, language="en") == expected_prompt
 
 def test_get_instructions_prompt_empty_list():
     with pytest.raises(ValueError, match="Instructions must be a non-empty list"):
@@ -36,7 +36,7 @@ def test_get_instructions_prompt_empty_list():
 def test_get_instructions_prompt_single_instruction():
     instructions = ["Single instruction"]
     expected_prompt = """
-You are given the following instructions: 
+You are given the following instructions:
 * Single instruction
 
 If the instructions are violated, you should alert the user.
@@ -47,7 +47,12 @@ Please generate a structured response in raw JSON format:
 - recommended_awareness_level (Enum AwarenessLevel; one of: LOW, MEDIUM, HIGH)
 Always respond in English, regardless of the content in the images.
         """
-    assert get_instructions_prompt(instructions) == expected_prompt 
+    assert get_instructions_prompt(instructions, language="en") == expected_prompt
+
+def test_get_instructions_prompt_chinese():
+    prompt = get_instructions_prompt(["宝宝不能做危险的动作。"], language="zh")
+    assert "宝宝不能做危险的动作。" in prompt
+    assert "始终使用中文回答" in prompt
 
 def test_watcher_response_valid():
     data = {

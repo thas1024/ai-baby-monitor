@@ -4,6 +4,6 @@ camera:
   uri: "1"
 
 instructions:
-  - "The baby shouldn't do anything dangerous."
-  - "An adult should be in the room with the baby if the baby is awake."
-  - "The baby shouldn't try to climb out of the crib."
+  - "宝宝不能做任何危险的动作。"
+  - "如果宝宝醒着，房间里必须有大人在场。"
+  - "宝宝不能试图爬出婴儿床。"
