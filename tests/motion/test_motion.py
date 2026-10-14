@@ -253,3 +253,32 @@ def test_day_to_night_transition_resets_anchor_and_annotates():
     # The post-switch grayscale frames share the new anchor -> only one image, no burst.
     assert items[3].night is True
     assert items[4].count == 1
+
+
+# --- blank / no-signal frames ---
+
+def _flat_gray(value=128) -> np.ndarray:
+    ok, buffer = cv2.imencode(".jpg", np.full((90, 160, 3), value, np.uint8))
+    assert ok
+    return buffer
+
+
+def test_blank_frame_detected():
+    from ai_baby_monitor.motion import is_blank_frame
+
+    assert is_blank_frame(_flat_gray(128)) is True
+    assert is_blank_frame(_jpeg(1)) is False  # real content
+
+
+def test_blank_frame_is_not_night():
+    # A flat gray frame from a dead stream is grayscale (sat 0) but has no
+    # content, so it must NOT be classified as night-vision.
+    from ai_baby_monitor.motion import is_night_frame
+
+    assert is_night_frame(_flat_gray(128)) is False
+
+
+def test_real_grayscale_is_still_night():
+    from ai_baby_monitor.motion import is_night_frame
+
+    assert is_night_frame(_gray_jpeg(1)) is True

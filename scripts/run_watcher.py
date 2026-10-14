@@ -11,7 +11,7 @@ from ai_baby_monitor.alerts import is_alert_worthy, should_emit_alert
 from ai_baby_monitor.config import CameraConfig, load_room_config_file
 from ai_baby_monitor.imaging import encode_thumbnail
 from ai_baby_monitor.keys import camera_keys, room_keys
-from ai_baby_monitor.motion import frame_diff_score, should_analyze
+from ai_baby_monitor.motion import frame_diff_score, is_blank_frame, should_analyze
 from ai_baby_monitor.stream import RedisStreamHandler
 from ai_baby_monitor.watcher import CameraWindow, Watcher
 
@@ -220,6 +220,30 @@ def run_watcher(
                         night_threshold=cam.night_saturation_threshold,
                     )
                 )
+
+            # Drop cameras whose current frame is flat/blank — a dead feed. Don't
+            # send a useless gray frame to the model, don't advance its baseline.
+            dead_cameras = [
+                w.name for w in windows if is_blank_frame(w.frames[-1].frame_data)
+            ]
+            if dead_cameras:
+                logger.warning("Cameras with no signal (blank frames)", cameras=dead_cameras)
+                windows = [w for w in windows if w.name not in dead_cameras]
+
+            if not windows:
+                logger.warning("All cameras blank; skipping analysis", room=room_name)
+                redis_handler.add_logs(
+                    logs_key,
+                    {
+                        "timestamp": time.time(),
+                        "error": "no live video: all cameras returned blank/flat "
+                        "frames (stream likely failed)",
+                    },
+                )
+                # Throttle these health warnings to the room's min interval.
+                last_call_monotonic = time.monotonic()
+                time.sleep(WATCHER_POLL_SECONDS)
+                continue
 
             logger.info(
                 "Analyzing cameras",

@@ -10,6 +10,7 @@ from ai_baby_monitor.motion import (
     ImageItem,
     ModeTransitionItem,
     build_timeline,
+    is_blank_frame,
     is_night_frame,
 )
 from ai_baby_monitor.stream import Frame
@@ -416,6 +417,25 @@ class Watcher:
         if not windows:
             logger.warning("No frames provided for processing")
             return {"success": False, "error": "No frames provided"}
+
+        # Drop cameras whose current frame is flat/blank (dead feed) — analyzing a
+        # static gray frame is useless and yields false "can't see anything" verdicts.
+        live_windows = [
+            w for w in windows if not is_blank_frame(w.frames[-1].frame_data)
+        ]
+        dead_cameras = [
+            w.name for w in windows if is_blank_frame(w.frames[-1].frame_data)
+        ]
+        if not live_windows:
+            logger.warning("All cameras are blank (no signal)", cameras=dead_cameras)
+            return {
+                "success": False,
+                "error": "no live video: all cameras returned blank/flat frames "
+                "(stream likely failed)",
+            }
+        if dead_cameras:
+            logger.warning("Skipping blank cameras", cameras=dead_cameras)
+        windows = live_windows
 
         try:
             parts = self._build_content(windows)

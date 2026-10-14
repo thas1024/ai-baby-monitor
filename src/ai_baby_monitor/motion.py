@@ -39,6 +39,10 @@ _CHANGED_NOISE_FLOOR = 8
 # Mean HSV saturation at or below this counts as a grayscale (night-vision) frame.
 # Real color frames sit well above it; grayscale JPEGs are ~0.
 _NIGHT_SATURATION_THRESHOLD = 12.0
+# Grayscale standard deviation at or below this means the frame has no content —
+# a flat/blank image (value ~128) as emitted when a stream has no signal. Such
+# frames must NOT be treated as night-vision; they mean the camera feed is dead.
+_BLANK_STD_THRESHOLD = 2.0
 
 # Supported metrics. Their score scales differ, so a threshold must never be
 # reused across metrics (see ``resolve_threshold``/``DEFAULT_THRESHOLDS``).
@@ -136,8 +140,35 @@ def frame_saturation(frame_data) -> float:
     return float(np.mean(hsv[:, :, 1]))
 
 
+def frame_gray_std(frame_data) -> float:
+    """Standard deviation of a frame's grayscale brightness.
+
+    Near-zero means a flat/blank frame (no signal), as opposed to a real scene.
+    Returns ``math.inf`` on decode failure (a broken frame is not "blank").
+    """
+    gray = _decode_small_gray(bytes(frame_data))
+    if gray is None:
+        return math.inf
+    return float(np.std(gray))
+
+
+def is_blank_frame(frame_data, std_threshold: float | None = None) -> bool:
+    """Whether a frame is a flat/blank image (stream has no signal).
+
+    A dead RTSP feed often yields a uniform gray frame (brightness ~128, std ~0).
+    """
+    resolved = _BLANK_STD_THRESHOLD if std_threshold is None else std_threshold
+    return frame_gray_std(frame_data) <= resolved
+
+
 def is_night_frame(frame_data, threshold: float | None = None) -> bool:
-    """Whether a frame looks grayscale (camera in IR/night-vision mode)."""
+    """Whether a frame looks grayscale (camera in IR/night-vision mode).
+
+    Requires low saturation *and* actual image content: a flat gray frame from a
+    dead stream also has zero saturation and must not be read as night-vision.
+    """
+    if is_blank_frame(frame_data):
+        return False
     resolved = _NIGHT_SATURATION_THRESHOLD if threshold is None else threshold
     return frame_saturation(frame_data) <= resolved
 

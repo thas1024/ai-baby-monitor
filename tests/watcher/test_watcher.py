@@ -440,3 +440,34 @@ def test_process_room_all_empty_returns_error():
     watcher = Watcher(instructions=["Test"])
     result = watcher.process_room([CameraWindow(frames=[], name="a")])
     assert result["success"] is False
+
+
+def test_process_room_skips_blank_cameras():
+    from ai_baby_monitor.watcher import CameraWindow
+
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    blank = cv2.imencode(".jpg", np.full((90, 160, 3), 128, np.uint8))[1]
+    result = watcher.process_room(
+        [
+            CameraWindow(frames=[_frame_with(blank)], name="dead"),
+            CameraWindow(frames=[_frame_with(_real_jpeg(1))], name="live", motion_threshold=0.0),
+        ]
+    )
+    assert result["success"] is True
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    texts = " ".join(p["text"] for p in content if p["type"] == "text")
+    assert "dead" not in texts
+    assert "live" in texts
+
+
+def test_process_room_all_blank_returns_error():
+    from ai_baby_monitor.watcher import CameraWindow
+
+    watcher = Watcher(instructions=["Test"])
+    blank = cv2.imencode(".jpg", np.full((90, 160, 3), 128, np.uint8))[1]
+    result = watcher.process_room([CameraWindow(frames=[_frame_with(blank)], name="dead")])
+    assert result["success"] is False
+    assert "no live video" in result["error"]
