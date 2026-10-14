@@ -1,7 +1,27 @@
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env(value: str) -> str:
+    """Expand ``${VAR}`` references in a config value from the environment.
+
+    Lets secrets (e.g. a camera RTSP URL with credentials) live in ``.env``
+    instead of the tracked YAML. Raises if a referenced variable is unset.
+    """
+
+    def replace(match: re.Match) -> str:
+        name = match.group(1)
+        if name not in os.environ:
+            raise ValueError(f"Environment variable '{name}' referenced in config is not set")
+        return os.environ[name]
+
+    return _ENV_VAR_PATTERN.sub(replace, value)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -32,7 +52,7 @@ def load_room_config_file(config_path: str | Path) -> RoomConfig:
         config_kwargs = {
             # Required fields
             "name": data["name"],
-            "camera_uri": data["camera"]["uri"],
+            "camera_uri": _expand_env(str(data["camera"]["uri"])),
             "instructions": data.get("instructions", []),
             
             # Optional fields (only include if specified in YAML)

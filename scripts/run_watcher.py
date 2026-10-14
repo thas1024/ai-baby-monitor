@@ -8,17 +8,48 @@ from dotenv import load_dotenv
 from playsound3 import playsound
 
 from ai_baby_monitor.config import load_room_config_file
+from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.stream import RedisStreamHandler
 from ai_baby_monitor.watcher import Watcher
 
 logger = structlog.get_logger()
 
 load_dotenv()
-REDIS_HOST = "localhost"
+# Redis is external (see .env); the watcher uses the same REDIS_HOST as the
+# containers. When run in Docker it resolves to the container's view of Redis.
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = os.getenv("REDIS_PORT")
-VLLM_HOST = "localhost"
-VLLM_PORT = os.getenv("VLLM_PORT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+
+# The watcher calls an OpenAI-compatible endpoint (cloud or local) over the
+# network. See .env.template for the LLM_* variables.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME")
+# "chat" (Chat Completions, default) or "responses" (OpenAI Responses API).
+LLM_API_MODE = os.getenv("LLM_API_MODE", "chat")
+# Play the alert beep on a rule violation. Set to false in headless/container
+# deployments where there is no audio output.
+ALERT_SOUND_ENABLED = os.getenv("ALERT_SOUND_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def _play_alert(sound_path: str = "assets/alert.wav") -> None:
+    """Play the alert beep, tolerating a missing audio backend.
+
+    Never raises: a headless host or container has no audio output, and a failed
+    beep must not stop the watcher.
+    """
+    if not ALERT_SOUND_ENABLED:
+        logger.info("Alert beep suppressed", reason="ALERT_SOUND_ENABLED is off")
+        return
+    try:
+        playsound(sound_path)
+    except Exception as e:
+        logger.warning("Could not play alert sound", error=str(e))
 
 
 def run_watcher(
@@ -26,10 +57,12 @@ def run_watcher(
     redis_host: str,
     redis_port: int,
     instructions: list[str],
-    vllm_host: str,
-    vllm_port: int,
+    base_url: str,
+    api_key: str,
     model_name: str,
     num_frames_to_process: int,
+    api_mode: str = "chat",
+    redis_password: str | None = None,
 ):
     """
     Run the Watcher continuously to monitor frames from Redis stream.
@@ -39,36 +72,39 @@ def run_watcher(
         redis_host: Redis server host.
         redis_port: Redis server port.
         instructions: List of monitoring instructions to check (from room config).
-        vllm_host: vLLM server host.
-        vllm_port: vLLM server port.
+        base_url: Base URL of the OpenAI-compatible endpoint.
+        api_key: API key for the endpoint.
         model_name: Model name to use for inference (from room config).
         num_frames_to_process: Number of frames to analyze in each batch.
+        api_mode: "chat" (Chat Completions) or "responses" (Responses API).
+        redis_password: Redis password (None for servers without auth).
     """
     # Initialize Redis stream handler
     redis_handler = RedisStreamHandler(
         redis_host=redis_host,
         redis_port=redis_port,
+        redis_password=redis_password,
     )
 
     # Initialize Watcher
     nanny_watcher = Watcher(
         instructions=instructions,
-        vllm_host=vllm_host,
-        vllm_port=vllm_port,
         model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
     )
 
     # Subsampled stream key
-    subsampled_key = f"{redis_stream_key}:subsampled"
-    logs_key = f"{redis_stream_key}:logs"
+    keys = room_keys(redis_stream_key)
+    subsampled_key = keys["subsampled"]
+    logs_key = keys["logs"]
     logger.info(
         "Starting Watcher monitoring Redis",
         video_queue_key=subsampled_key,
         logs_queue_key=logs_key,
     )
-    logger.info(
-        "Using model", model_name=model_name, vllm_host=vllm_host, vllm_port=vllm_port
-    )
+    logger.info("Using model", model_name=model_name, base_url=base_url, api_mode=api_mode)
     logger.info("Monitoring instructions", instructions=instructions)
 
     try:
@@ -116,7 +152,7 @@ def run_watcher(
                 redis_handler.add_logs(logs_key, log_data)
 
                 if result["should_alert"]:
-                    playsound("assets/alert.wav")
+                    _play_alert()
             else:
                 error_msg = result.get("error", "Unknown error")
                 logger.error("Error processing frames", error=error_msg)
@@ -172,15 +208,35 @@ if __name__ == "__main__":
             )
             exit(1)
 
+        # Ensure the LLM endpoint settings are present.
+        missing_env = [
+            name
+            for name, value in (
+                ("LLM_BASE_URL", LLM_BASE_URL),
+                ("LLM_API_KEY", LLM_API_KEY),
+                ("LLM_MODEL_NAME", LLM_MODEL_NAME),
+            )
+            if not value
+        ]
+        if missing_env:
+            logger.error(
+                "Missing required environment variables for the LLM endpoint",
+                missing=missing_env,
+                hint="Copy .env.template to .env and fill in the LLM_* values.",
+            )
+            exit(1)
+
         run_watcher(
             redis_stream_key=redis_stream_key,
             redis_host=REDIS_HOST,
             redis_port=REDIS_PORT,
             instructions=instructions,
-            vllm_host=VLLM_HOST,
-            vllm_port=VLLM_PORT,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
             model_name=LLM_MODEL_NAME,
             num_frames_to_process=num_frames_to_process,
+            api_mode=LLM_API_MODE,
+            redis_password=REDIS_PASSWORD,
         )
     except FileNotFoundError:
         logger.error(f"Configuration file not found: {args.config_file}")

@@ -1,7 +1,8 @@
 name: "living_room"
 
 camera:
-  uri: "0"
+  # Camera RTSP URL (with credentials) lives in .env as CAMERA_URI, not here.
+  uri: "${CAMERA_URI}"
 
 instructions:
   - "The baby shouldn't do anything dangerous."

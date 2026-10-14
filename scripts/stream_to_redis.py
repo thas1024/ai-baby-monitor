@@ -7,6 +7,7 @@ import structlog
 from dotenv import load_dotenv
 
 from ai_baby_monitor.config import load_room_config_file
+from ai_baby_monitor.keys import room_keys
 from ai_baby_monitor.stream import CameraStream, RedisStreamHandler
 
 logger = structlog.get_logger()
@@ -14,6 +15,7 @@ logger = structlog.get_logger()
 load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = os.getenv("REDIS_PORT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 
 
 def stream_to_redis(
@@ -26,6 +28,7 @@ def stream_to_redis(
     frame_width: int | None,
     frame_height: int | None,
     subsample_rate: int = 4,
+    redis_password: str | None = None,
 ):
     """
     Stream camera frames to Redis short realtime and long subsampled queues.
@@ -65,9 +68,12 @@ def stream_to_redis(
         redis_handler = RedisStreamHandler(
             redis_host=redis_host,
             redis_port=redis_port,
+            redis_password=redis_password,
         )
 
         logger.info("Starting to stream to redis.")
+
+        keys = room_keys(redis_stream_key)
 
         # Main streaming loop
         while True:
@@ -75,15 +81,13 @@ def stream_to_redis(
             frame = camera.capture_new_frame()
             if frame:
                 # Always add frame to realtime queue
-                redis_handler.add_frame(
-                    frame, f"{redis_stream_key}:realtime", 3, approximate=False
-                )
+                redis_handler.add_frame(frame, keys["realtime"], 3, approximate=False)
 
                 # Add to subsampled queue every nth frame
                 if frame.frame_idx % subsample_rate == 0:
                     redis_handler.add_frame(
                         frame,
-                        f"{redis_stream_key}:subsampled",
+                        keys["subsampled"],
                         subsampled_stream_maxlen,
                     )
                     logger.info(
@@ -161,6 +165,7 @@ if __name__ == "__main__":
             frame_width=room_config.frame_width,
             frame_height=room_config.frame_height,
             subsample_rate=room_config.subsample_rate,
+            redis_password=REDIS_PASSWORD,
         )
     except Exception as e:
         logger.error("Failed to start streaming", error=e)

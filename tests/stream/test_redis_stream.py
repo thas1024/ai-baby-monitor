@@ -23,7 +23,9 @@ def redis_handler(mock_redis_client: MagicMock):
     """Fixture for RedisStreamHandler initialized with a mock Redis client."""
     with patch("redis.Redis", return_value=mock_redis_client) as mock_redis_constructor:
         handler = RedisStreamHandler(redis_host="mock_host", redis_port=1234)
-        mock_redis_constructor.assert_called_once_with(host="mock_host", port=1234)
+        mock_redis_constructor.assert_called_once_with(
+            host="mock_host", port=1234, password=None
+        )
     return handler
 
 

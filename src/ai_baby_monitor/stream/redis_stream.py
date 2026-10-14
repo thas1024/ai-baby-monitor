@@ -14,6 +14,7 @@ class RedisStreamHandler:
         self,
         redis_host: str = "localhost",
         redis_port: int = 6379,
+        redis_password: str | None = None,
     ):
         """
         Handler for streaming camera frames to Redis.
@@ -21,12 +22,18 @@ class RedisStreamHandler:
         Args:
             redis_host: Redis server host
             redis_port: Redis server port
+            redis_password: Redis password (None for servers without auth)
         """
-        self.redis_client = redis.Redis(host=redis_host, port=redis_port)
+        self.redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            password=redis_password,
+        )
         logger.info(
             "Initialized Redis stream handler",
             redis_host=redis_host,
             redis_port=redis_port,
+            auth="password" if redis_password else "none",
         )
 
     @staticmethod

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from ai_baby_monitor.config import RoomConfig, load_room_config_file
@@ -62,3 +63,20 @@ def test_load_room_config_file_with_partial_optional_fields(tmp_path: Path):
     assert config.subsampled_stream_maxlen == 64  # default
     assert config.subsample_rate == 4  # default
     assert config.instructions == []  # default
+
+
+def test_camera_uri_expands_env_var(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CAMERA_URI", "rtsp://u:p@host:554/s")
+    sample = {"name": "r", "camera": {"uri": "${CAMERA_URI}"}}
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    assert load_room_config_file(config_path).camera_uri == "rtsp://u:p@host:554/s"
+
+
+def test_camera_uri_missing_env_var_raises(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("CAMERA_URI", raising=False)
+    sample = {"name": "r", "camera": {"uri": "${CAMERA_URI}"}}
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    with pytest.raises(ValueError, match="CAMERA_URI"):
+        load_room_config_file(config_path)

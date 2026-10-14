@@ -1,12 +1,13 @@
 services:
-  redis:
-    image: redis:latest
-    ports:
-      - "${REDIS_PORT}:${REDIS_PORT}"
-    networks:
-      - app-network
+  # NOTE: Redis is NOT managed here — the app uses an external Redis (e.g. one
+  # already running on the host). Point REDIS_HOST/REDIS_PORT/REDIS_PASSWORD at
+  # it in .env. Containers can reach the host's IP directly on a bridge network.
 
+  # Optional local inference backend. Not started by default — by default the
+  # watcher calls a cloud / custom OpenAI-compatible endpoint (see LLM_BASE_URL
+  # in .env). Start this with: docker compose --profile local up -d
   vllm:
+    profiles: ["local"]
     image: vllm/vllm-openai:v0.8.4
     command: >
       --model ${LLM_MODEL_NAME}
@@ -40,20 +41,17 @@ services:
     networks:
       - app-network
 
+  # Shared image build, used only as a base for `extends` below. It has no real
+  # work, so it just idles (children override `command`) — without this it would
+  # exit immediately and restart-loop.
   python-base:
     build:
       context: .
       dockerfile: Dockerfile.python
     env_file:
       - .env
-    depends_on:
-      redis:
-        condition: service_started
-      vllm:
-        condition: service_healthy
+    command: ["sleep", "infinity"]
     restart: unless-stopped
-    networks:
-      - app-network
     volumes:
       - ./scripts:/app/scripts
       - ./configs:/app/configs
@@ -62,14 +60,38 @@ services:
   stream_to_redis:
     extends:
       service: python-base
+    networks:
+      - app-network
     command: >
       sh -c "
       uv run python scripts/stream_to_redis.py --config-file configs/living_room.yaml
       "
 
+  # The watcher calls the LLM endpoint and writes logs back to Redis. It runs
+  # fine in a container now that the alert beep is disabled — the beep only
+  # mattered for host audio, and headless hosts have none anyway. Set
+  # ALERT_SOUND_ENABLED=true (and run on the host) only if you want the beep.
+  #
+  # It uses host networking so it can reach host-local services (the Redis and
+  # the OpenAI-compatible gateway bound on the host) exactly like a host process
+  # — a bridge container cannot reach non-published host ports.
+  watcher:
+    extends:
+      service: python-base
+    network_mode: host
+    environment:
+      # Containers have no audio output; suppress the beep.
+      - ALERT_SOUND_ENABLED=false
+    command: >
+      sh -c "
+      uv run python scripts/run_watcher.py --config-file configs/living_room.yaml
+      "
+
   streamlit_viewer:
     extends:
       service: python-base
+    networks:
+      - app-network
     command: >
       sh -c "
       uv run streamlit run scripts/streamlit_viewer.py --server.port 8501 --server.address 0.0.0.0 -- --config-files configs/living_room.yaml

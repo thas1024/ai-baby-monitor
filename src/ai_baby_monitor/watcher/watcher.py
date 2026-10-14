@@ -2,7 +2,7 @@ import base64
 from enum import Enum
 
 import structlog
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
 from ai_baby_monitor.stream import Frame
@@ -27,39 +27,82 @@ class Watcher:
     def __init__(
         self,
         instructions: list[str],
-        vllm_host: str = "localhost",
-        vllm_port: int = 8000,
-        model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ",
+        model_name: str = "gpt-4o-mini",
+        base_url: str = "https://api.openai.com/v1",
+        api_key: str = "EMPTY",
+        api_mode: str = "chat",
     ):
         """
-        Initialize the Watcher with instructions and vLLM server details.
+        Initialize the Watcher with instructions and OpenAI-compatible endpoint details.
 
         Args:
             instructions: List of monitoring instructions to check against frames
-            vllm_host: Hostname of the vLLM server
-            vllm_port: Port of the vLLM server
-            model_name: Name of the model to use for inference
+            model_name: Name of the vision model to use for inference
+            base_url: Base URL of the OpenAI-compatible endpoint (cloud or local)
+            api_key: API key for the endpoint ("EMPTY" works for servers without auth)
+            api_mode: Which OpenAI protocol to speak. "chat" for Chat Completions
+                (``/v1/chat/completions``), "responses" for the Responses API
+                (``/v1/responses``). Chat Completions is near-universally supported
+                by compatible endpoints, so it is the default.
         """
+        if api_mode not in ("chat", "responses"):
+            raise ValueError(
+                f"api_mode must be 'chat' or 'responses', got {api_mode!r}"
+            )
+
         self.instructions_prompt = get_instructions_prompt(instructions)
-        self.json_schema = WatcherResponse.model_json_schema()
+        self.json_schema = self._make_strict(WatcherResponse.model_json_schema())
 
-        self.vllm_host = vllm_host
-        self.vllm_port = vllm_port
         self.model_name = model_name
+        self.base_url = base_url
+        self.api_mode = api_mode
 
-        # Initialize OpenAI client for vLLM server
+        # Initialize OpenAI client for any OpenAI-compatible endpoint.
         self.client = OpenAI(
-            api_key="EMPTY",
-            base_url=f"http://{vllm_host}:{vllm_port}/v1",
+            api_key=api_key,
+            base_url=base_url,
         )
+
+        # Structured-output options, most strict first, expressed mode-agnostically
+        # as the response_format "type". Compatible endpoints differ in what they
+        # support, so we negotiate lazily on the first request and cache the winner
+        # by moving it to the front.
+        self._response_format_options: list[str | None] = [
+            "json_schema",
+            "json_object",
+            None,
+        ]
 
         logger.info(
             "Initialized Watcher",
             model_name=model_name,
-            vllm_host=vllm_host,
-            vllm_port=vllm_port,
+            base_url=base_url,
+            api_mode=api_mode,
             instructions=instructions,
         )
+
+    @staticmethod
+    def _make_strict(schema: dict) -> dict:
+        """Make a Pydantic JSON schema OpenAI-Structured-Outputs compatible.
+
+        OpenAI strict mode requires every object to set ``additionalProperties:
+        false`` and to list all its properties in ``required``. Pydantic omits
+        both by default, so add them recursively.
+        """
+
+        def walk(node) -> None:
+            if isinstance(node, dict):
+                if node.get("type") == "object" and "properties" in node:
+                    node["additionalProperties"] = False
+                    node["required"] = list(node["properties"].keys())
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(schema)
+        return schema
 
     def _frames_to_base64(self, frames: list[Frame]) -> list[str]:
         """Convert JPEG-encoded frame data to base64 encoded strings."""
@@ -72,7 +115,11 @@ class Watcher:
         return base64_frames
 
     def _calculate_fps(self, frames: list[Frame], default_fps: int = 2) -> int:
-        """Calculate FPS from frame timestamps, defaulting to 2 if calculation fails."""
+        """Calculate FPS from frame timestamps, defaulting to 2 if calculation fails.
+
+        Retained as a utility; the request path no longer needs it now that frames
+        are sent as individual images rather than a vLLM video blob.
+        """
         if len(frames) < 2:
             logger.warning("Too few frames to calculate FPS, using default of 2")
             return default_fps
@@ -91,9 +138,123 @@ class Watcher:
             logger.warning("FPS calculation error", error=e)
             return default_fps
 
-    def process_frames(
-        self, frames: list[Frame], fps: int | None = None
-    ) -> dict[str, str | bool]:
+    def _build_response_format(self, kind: str) -> dict:
+        """Translate a mode-agnostic format kind into the selected API's payload."""
+        if self.api_mode == "responses":
+            if kind == "json_schema":
+                return {
+                    "type": "json_schema",
+                    "name": "WatcherResponse",
+                    "schema": self.json_schema,
+                    "strict": True,
+                }
+            return {"type": "json_object"}
+
+        # chat completions
+        if kind == "json_schema":
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "WatcherResponse",
+                    "schema": self.json_schema,
+                    "strict": True,
+                },
+            }
+        return {"type": "json_object"}
+
+    def _request(self, base64_frames: list[str], fmt_kind: str | None) -> str:
+        """Issue one request using the configured protocol; return the text output."""
+        system_prompt = "You are a helpful assistant and baby sitter."
+
+        if self.api_mode == "responses":
+            content: list[dict] = [
+                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
+                for b64 in base64_frames
+            ]
+            content.append({"type": "input_text", "text": self.instructions_prompt})
+            kwargs: dict = {
+                "model": self.model_name,
+                "input": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0.1,
+                "max_output_tokens": 512,
+                # Some Responses endpoints (incl. gateway/proxy setups) reject
+                # non-streaming requests with "Stream must be set to true", so
+                # always stream and reassemble the text from the deltas.
+                "stream": True,
+            }
+            if fmt_kind is not None:
+                kwargs["text"] = {"format": self._build_response_format(fmt_kind)}
+            return self._consume_response_stream(self.client.responses.create(**kwargs))
+
+        # chat completions: each frame as its own image_url, then the instructions.
+        content = [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            }
+            for b64 in base64_frames
+        ]
+        content.append({"type": "text", "text": self.instructions_prompt})
+        kwargs = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 512,
+        }
+        if fmt_kind is not None:
+            kwargs["response_format"] = self._build_response_format(fmt_kind)
+        response = self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content
+
+    @staticmethod
+    def _consume_response_stream(stream) -> str:
+        """Concatenate the text deltas from a Responses API event stream."""
+        parts: list[str] = []
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                parts.append(event.delta)
+            elif event_type in ("response.failed", "error"):
+                raise RuntimeError(f"Responses stream error: {event}")
+        return "".join(parts)
+
+    def _create_completion(self, base64_frames: list[str]) -> str:
+        """Call the endpoint, negotiating structured-output support.
+
+        Endpoints vary in how they enforce JSON: OpenAI Structured Outputs
+        (``json_schema``), plain JSON mode (``json_object``), or neither. Options
+        are tried in ``_response_format_options`` order; the first that works is
+        moved to the front so the fallback only costs one request. Returns the raw
+        text content of the response.
+        """
+        last_error: Exception | None = None
+
+        for fmt_kind in self._response_format_options:
+            try:
+                text = self._request(base64_frames, fmt_kind)
+            except BadRequestError as e:
+                logger.warning(
+                    "Endpoint rejected response_format, trying next option",
+                    response_format=fmt_kind,
+                    error=str(e),
+                )
+                last_error = e
+                continue
+
+            # Remember the working option by moving it to the front.
+            self._response_format_options.remove(fmt_kind)
+            self._response_format_options.insert(0, fmt_kind)
+            return text
+
+        raise last_error
+
+    def process_frames(self, frames: list[Frame]) -> dict[str, str | bool]:
         """Process frames to detect instruction violations.
 
         Returns:
@@ -113,51 +274,17 @@ class Watcher:
             }
 
         try:
-            # Convert frames to base64
             base64_frames = self._frames_to_base64(frames)
+            raw_response = self._create_completion(base64_frames)
 
-            # Create video URL with proper format for vLLM
-            encoded_video = f"data:video/jpeg;base64,{','.join(base64_frames)}"
-
-            # Create message with instructions
-            messages = [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant and baby sitter.",
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "video_url", "video_url": {"url": encoded_video}},
-                        {"type": "text", "text": self.instructions_prompt},
-                    ],
-                },
-            ]
-
-            # Send to vLLM server with proper mm_processor_kwargs and guided_json
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=512,
-                extra_body={
-                    "mm_processor_kwargs": {
-                        "fps": fps or [self._calculate_fps(frames)]
-                    },
-                    "guided_json": self.json_schema,
-                },
-            )
-            
-            parsed_response = WatcherResponse.model_validate_json(
-                response.choices[0].message.content
-            )
+            parsed_response = WatcherResponse.model_validate_json(raw_response)
 
             return {
                 "success": True,
                 "should_alert": parsed_response.should_alert,
                 "reasoning": parsed_response.reasoning,
                 "recommended_awareness_level": parsed_response.recommended_awareness_level,
-                "raw_response": response.choices[0].message.content,
+                "raw_response": raw_response,
             }
 
         except Exception as e:

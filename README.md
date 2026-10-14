@@ -34,9 +34,9 @@ Obviously, I'm not going to put my child in danger just for the demo, so here're
 
 |                       |                                                                                                                 |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------|
-| 🛡️ **Private‑first**  | Everything runs locally; nothing ever leaves your network.                                                      |
-| ⚡  **Realtime-ish**   | Works on consumer GPUs at ~1 req/s.                                                                             |
-| 🦾 **Video LLM**      | Uses the [Qwen2.5 VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct-AWQ) by default, served through vLLM.  |
+| 🛡️ **Private‑first**  | Point it at a local endpoint and nothing leaves your network; or use any cloud endpoint you trust.              |
+| ⚡  **Realtime-ish**   | A few requests per minute on a cloud endpoint; ~1 req/s on a local GPU.                                         |
+| 🦾 **Video LLM**      | Works with any OpenAI‑compatible vision endpoint — cloud or self‑hosted.                                         |
 | 🔔 **One beep alert** | Deliberately minimal & quiet  —  just look when it beeps.                                                       |
 | 🖥 **Live dashboard** | Streamlit viewer shows the live stream + LLM reasoning logs in real time.                                       |
 | 📝 **Easy rules**     | "The baby shouldn’t climb out of the crib", "Baby should always be accompanied by adult" … just edit YAML.      |
@@ -46,25 +46,25 @@ Obviously, I'm not going to put my child in danger just for the demo, so here're
 
 ## 🚀 Quick start
 
-> **Prerequisites** • Docker + docker‑compose • One GPU • Python 3.12 with [uv](https://github.com/astral-sh/uv)
+> **Prerequisites** • Docker + docker‑compose • Python 3.12 with [uv](https://github.com/astral-sh/uv) • An external Redis (host/port/password in .env) • An OpenAI‑compatible vision endpoint (cloud, or local via the optional `vllm` profile)
 
 ```bash
 # 1 — clone
 $ git clone https://github.com/zeenolife/ai-baby-monitor.git && cd ai-baby-monitor
 
-# 2 — copy .env.template into .env
+# 2 — copy .env.template into .env and fill in the LLM_* settings
 $ cp .env.template .env
 
-# 3 — build & start all services (Redis, vLLM, video streamer, Streamlit viewer)
+# 3 — build & start the services (video streamer, Streamlit viewer, watcher)
 $ docker compose up --build -d
 
-# 4 — start the watcher on the **host**. unfortunately playing sound in Docker container and propagating to host is really painful. so no docker compose here
-$ uv run scripts/run_watcher.py --config-file configs/living_room.yaml
-
+# 4 — (optional) run the watcher on the **host** only if you want the audible beep —
+#     containers have no audio output. Otherwise it already runs inside compose.
+$ ALERT_SOUND_ENABLED=true uv run scripts/run_watcher.py --config-file configs/living_room.yaml
 # 5 — open the dashboard 👉 http://localhost:8501. You can also open the dashboard on your phone http://{host_network_ip}:8501
 ```
 
-> **Heads‑up** The first run downloads the model (\~6 GB), builds docker image and may take a few minutes.
+> **Heads‑up** The first run builds the docker image and may take a few minutes. With the optional local `vllm` profile it also downloads the model first.
 
 ---
 
@@ -76,15 +76,16 @@ Add or tweak rooms in `configs/*.yaml`:
 name: "living_room"
 
 camera:
-  uri: "0"            # webcam index or RTSP URI
+  uri: "0"            # webcam index or RTSP URI. Use "${CAMERA_URI}" to keep
+                      # the URL (with credentials) out of the repo, in .env.
 
 instructions:          # natural‑language rules for the nanny model
   - "The baby shouldn't do anything dangerous."
   - "An adult should be in the room if the baby is awake."
 ```
 
-* **Multiple rooms**? Edit `docker-compose.yml` and create `stream_to_redis` per room. Pass in new room config to streamlit viewer. Spawn new `run_watcher.py` process on host for new room config. 
-* **Swap the model**? Set LLM_MODEL_NAME in .env. Check [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-multimodal-language-models)
+* **Multiple rooms**? Edit `docker-compose.yml` and add a `stream_to_redis` and a `watcher` service per room. Pass the new room config to the streamlit viewer.
+* **Swap the model / backend**? Set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_NAME` in `.env` to point at any OpenAI‑compatible vision endpoint. Set `LLM_API_MODE=responses` to use the OpenAI Responses API instead of the default Chat Completions API. To fall back to local inference, run `docker compose --profile local up -d` and set `LLM_BASE_URL=http://localhost:8000/v1`.
 
 ---
 
@@ -94,7 +95,7 @@ instructions:          # natural‑language rules for the nanny model
 ---
 
 1. **`stream_to_redis.py`** captures frames and pushes them to Redis (short *realtime* & long *subsampled* frames queues).
-2. **`run_watcher.py`** pulls latest N frames, encodes instructions and frames into prompt and sends them to local vLLM server, receives structured JSON, writes logs & plays a beep if receives `should_alert = True`.
+2. **`run_watcher.py`** pulls latest N frames, encodes instructions and frames into prompt and sends them to the OpenAI‑compatible endpoint, receives structured JSON, writes logs & plays a beep if receives `should_alert = True`.
 3. **Streamlit** live‑updates the latest frame + llm logs.
 
 ---

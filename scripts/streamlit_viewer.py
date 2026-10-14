@@ -17,6 +17,7 @@ from ai_baby_monitor.ui import (
 load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = os.getenv("REDIS_PORT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 
 logger = structlog.get_logger()
 
@@ -47,7 +48,7 @@ if "room_configs" not in st.session_state:
         st.error("No room config file was provided.")
     st.session_state["room_configs"] = room_configs
 
-redis_handler = get_cached_redis_handler(REDIS_HOST, REDIS_PORT)
+redis_handler = get_cached_redis_handler(REDIS_HOST, REDIS_PORT, REDIS_PASSWORD)
 
 # Sidebar has a side-effect of setting selected config and real-time stream vs historic logs
 display_sidebar(
