@@ -1,14 +1,37 @@
 import base64
+from dataclasses import dataclass
 from enum import Enum
 
 import structlog
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
+from ai_baby_monitor.motion import ImageItem, build_timeline
 from ai_baby_monitor.stream import Frame
-from ai_baby_monitor.watcher import get_instructions_prompt
+from ai_baby_monitor.watcher import (
+    format_frame_annotation,
+    format_skipped_annotation,
+    get_instructions_prompt,
+)
 
 logger = structlog.get_logger()
+
+
+@dataclass
+class TextPart:
+    """A text segment in the request content."""
+
+    text: str
+
+
+@dataclass
+class ImagePart:
+    """A base64-encoded JPEG image segment in the request content."""
+
+    base64_data: str
+
+
+ContentPart = TextPart | ImagePart
 
 
 class AwarenessLevel(str, Enum):
@@ -31,6 +54,7 @@ class Watcher:
         base_url: str = "https://api.openai.com/v1",
         api_key: str = "EMPTY",
         api_mode: str = "chat",
+        motion_threshold: float = 0.0,
     ):
         """
         Initialize the Watcher with instructions and OpenAI-compatible endpoint details.
@@ -44,6 +68,9 @@ class Watcher:
                 (``/v1/chat/completions``), "responses" for the Responses API
                 (``/v1/responses``). Chat Completions is near-universally supported
                 by compatible endpoints, so it is the default.
+            motion_threshold: Mean pixel-difference above which two frames count as
+                changed. Non-positive disables intra-window compression (every frame
+                is sent as an image).
         """
         if api_mode not in ("chat", "responses"):
             raise ValueError(
@@ -52,6 +79,7 @@ class Watcher:
 
         self.instructions_prompt = get_instructions_prompt(instructions)
         self.json_schema = self._make_strict(WatcherResponse.model_json_schema())
+        self.motion_threshold = motion_threshold
 
         self.model_name = model_name
         self.base_url = base_url
@@ -78,6 +106,7 @@ class Watcher:
             model_name=model_name,
             base_url=base_url,
             api_mode=api_mode,
+            motion_threshold=motion_threshold,
             instructions=instructions,
         )
 
@@ -104,15 +133,30 @@ class Watcher:
         walk(schema)
         return schema
 
-    def _frames_to_base64(self, frames: list[Frame]) -> list[str]:
-        """Convert JPEG-encoded frame data to base64 encoded strings."""
-        base64_frames = []
-        for frame in frames:
-            jpeg_bytes = bytes(frame.frame_data)
-            base64_str = base64.b64encode(jpeg_bytes).decode("utf-8")
-            base64_frames.append(base64_str)
+    def _build_content(self, frames: list[Frame]) -> list[ContentPart]:
+        """Turn a window of frames into request content parts.
 
-        return base64_frames
+        Compresses near-identical frames into time-annotated text notes (via
+        ``build_timeline``), so only changed frames are sent as images. Each
+        image is preceded by a ``[frame N @ <time>]`` annotation so the model can
+        place what it sees on a timeline.
+        """
+        parts: list[ContentPart] = []
+        for item in build_timeline(frames, self.motion_threshold):
+            if isinstance(item, ImageItem):
+                parts.append(
+                    TextPart(format_frame_annotation(item.index, item.frame.timestamp))
+                )
+                parts.append(ImagePart(base64.b64encode(bytes(item.frame.frame_data)).decode("utf-8")))
+            else:
+                parts.append(
+                    TextPart(
+                        format_skipped_annotation(
+                            item.count, item.start_ts, item.end_ts
+                        )
+                    )
+                )
+        return parts
 
     def _calculate_fps(self, frames: list[Frame], default_fps: int = 2) -> int:
         """Calculate FPS from frame timestamps, defaulting to 2 if calculation fails.
@@ -162,15 +206,26 @@ class Watcher:
             }
         return {"type": "json_object"}
 
-    def _request(self, base64_frames: list[str], fmt_kind: str | None) -> str:
-        """Issue one request using the configured protocol; return the text output."""
+    def _request(self, parts: list[ContentPart], fmt_kind: str | None) -> str:
+        """Issue one request using the configured protocol; return the text output.
+
+        Content parts are protocol-neutral; this method maps them to the selected
+        API's content schema and appends the instructions text last.
+        """
         system_prompt = "You are a helpful assistant and baby sitter."
 
         if self.api_mode == "responses":
-            content: list[dict] = [
-                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
-                for b64 in base64_frames
-            ]
+            content: list[dict] = []
+            for part in parts:
+                if isinstance(part, TextPart):
+                    content.append({"type": "input_text", "text": part.text})
+                else:
+                    content.append(
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{part.base64_data}",
+                        }
+                    )
             content.append({"type": "input_text", "text": self.instructions_prompt})
             kwargs: dict = {
                 "model": self.model_name,
@@ -189,14 +244,20 @@ class Watcher:
                 kwargs["text"] = {"format": self._build_response_format(fmt_kind)}
             return self._consume_response_stream(self.client.responses.create(**kwargs))
 
-        # chat completions: each frame as its own image_url, then the instructions.
-        content = [
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            }
-            for b64 in base64_frames
-        ]
+        # chat completions: annotated images, then the instructions.
+        content = []
+        for part in parts:
+            if isinstance(part, TextPart):
+                content.append({"type": "text", "text": part.text})
+            else:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{part.base64_data}"
+                        },
+                    }
+                )
         content.append({"type": "text", "text": self.instructions_prompt})
         kwargs = {
             "model": self.model_name,
@@ -224,7 +285,7 @@ class Watcher:
                 raise RuntimeError(f"Responses stream error: {event}")
         return "".join(parts)
 
-    def _create_completion(self, base64_frames: list[str]) -> str:
+    def _create_completion(self, parts: list[ContentPart]) -> str:
         """Call the endpoint, negotiating structured-output support.
 
         Endpoints vary in how they enforce JSON: OpenAI Structured Outputs
@@ -237,7 +298,7 @@ class Watcher:
 
         for fmt_kind in self._response_format_options:
             try:
-                text = self._request(base64_frames, fmt_kind)
+                text = self._request(parts, fmt_kind)
             except BadRequestError as e:
                 logger.warning(
                     "Endpoint rejected response_format, trying next option",
@@ -274,8 +335,9 @@ class Watcher:
             }
 
         try:
-            base64_frames = self._frames_to_base64(frames)
-            raw_response = self._create_completion(base64_frames)
+            parts = self._build_content(frames)
+            images_sent = sum(1 for part in parts if isinstance(part, ImagePart))
+            raw_response = self._create_completion(parts)
 
             parsed_response = WatcherResponse.model_validate_json(raw_response)
 
@@ -285,6 +347,8 @@ class Watcher:
                 "reasoning": parsed_response.reasoning,
                 "recommended_awareness_level": parsed_response.recommended_awareness_level,
                 "raw_response": raw_response,
+                "images_sent": images_sent,
+                "frames_skipped": len(frames) - images_sent,
             }
 
         except Exception as e:

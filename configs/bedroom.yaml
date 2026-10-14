@@ -2,6 +2,11 @@ name: "bedroom"
 
 camera:
   uri: "1"
+  # Request throttling (optional; defaults shown). motion_threshold=0 disables
+  # gating and per-frame compression entirely.
+  # motion_threshold: 3.0
+  # min_interval_seconds: 10.0
+  # max_interval_seconds: 30.0
 
 instructions:
   - "宝宝不能做任何危险的动作。"

@@ -9,6 +9,7 @@ from playsound3 import playsound
 
 from ai_baby_monitor.config import load_room_config_file
 from ai_baby_monitor.keys import room_keys
+from ai_baby_monitor.motion import frame_diff_score, should_analyze
 from ai_baby_monitor.stream import RedisStreamHandler
 from ai_baby_monitor.watcher import Watcher
 
@@ -35,6 +36,11 @@ ALERT_SOUND_ENABLED = os.getenv("ALERT_SOUND_ENABLED", "true").lower() in (
     "true",
     "yes",
 )
+
+# How often the gated loop checks the newest frame when it is not due yet.
+WATCHER_POLL_SECONDS = 0.3
+# Idle wait when there are no frames at all.
+NO_FRAMES_SLEEP_SECONDS = 0.3
 
 
 def _play_alert(sound_path: str = "assets/alert.wav") -> None:
@@ -63,9 +69,18 @@ def run_watcher(
     num_frames_to_process: int,
     api_mode: str = "chat",
     redis_password: str | None = None,
+    motion_threshold: float = 3.0,
+    min_interval_seconds: float = 10.0,
+    max_interval_seconds: float = 30.0,
+    subsampled_stream_maxlen: int = 64,
 ):
     """
     Run the Watcher continuously to monitor frames from Redis stream.
+
+    Request rate is controlled by motion gating (see ``ai_baby_monitor.motion``):
+    a cycle only calls the model when the newest frame differs from the last
+    analyzed frame, or the heartbeat interval elapses — floored by
+    ``min_interval_seconds``. A ``motion_threshold`` of 0 disables gating.
 
     Args:
         redis_stream_key: Base Redis stream key (e.g., room name from config). Will use {key}:subsampled for video frames and {key}:logs for logs.
@@ -75,9 +90,13 @@ def run_watcher(
         base_url: Base URL of the OpenAI-compatible endpoint.
         api_key: API key for the endpoint.
         model_name: Model name to use for inference (from room config).
-        num_frames_to_process: Number of frames to analyze in each batch.
+        num_frames_to_process: Number of frames to analyze when there is no previous window.
         api_mode: "chat" (Chat Completions) or "responses" (Responses API).
         redis_password: Redis password (None for servers without auth).
+        motion_threshold: Pixel-difference threshold for motion gating/compression (0 = off).
+        min_interval_seconds: Minimum seconds between model calls (rate floor).
+        max_interval_seconds: Heartbeat ceiling — analyze at least this often even without motion.
+        subsampled_stream_maxlen: Cap on frames fetched for catch-up (must cover max_interval).
     """
     # Initialize Redis stream handler
     redis_handler = RedisStreamHandler(
@@ -93,6 +112,7 @@ def run_watcher(
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
+        motion_threshold=motion_threshold,
     )
 
     # Subsampled stream key
@@ -103,31 +123,81 @@ def run_watcher(
         "Starting Watcher monitoring Redis",
         video_queue_key=subsampled_key,
         logs_queue_key=logs_key,
+        motion_threshold=motion_threshold,
+        min_interval_seconds=min_interval_seconds,
+        max_interval_seconds=max_interval_seconds,
     )
     logger.info("Using model", model_name=model_name, base_url=base_url, api_mode=api_mode)
     logger.info("Monitoring instructions", instructions=instructions)
 
+    # Motion-gating state. The baseline is the last frame of the last window that
+    # was *successfully* analyzed, so a failed call is retried next cycle.
+    last_analyzed_frame_data = None
+    last_analyzed_ts = None
+    last_call_monotonic = None
+
     try:
         while True:
-            # Get latest frames from Redis
-            frames = redis_handler.get_latest_frames(
-                subsampled_key, num_frames_to_process
-            )
-
-            if not frames:
+            latest = redis_handler.get_latest_frames(subsampled_key, 1)
+            if not latest:
                 logger.warning(
                     "No frames available in stream", video_queue_key=subsampled_key
                 )
-                time.sleep(0.3)
+                time.sleep(NO_FRAMES_SLEEP_SECONDS)
                 continue
 
-            logger.info("Analyzing frames from stream", num_frames=len(frames))
+            newest_frame = latest[0]
+            now_monotonic = time.monotonic()
 
-            # Process frames with Watcher
+            if not should_analyze(
+                newest_frame.frame_data,
+                last_analyzed_frame_data,
+                now_monotonic,
+                last_call_monotonic,
+                motion_threshold,
+                min_interval_seconds,
+                max_interval_seconds,
+            ):
+                time.sleep(WATCHER_POLL_SECONDS)
+                continue
+
+            # Gate is open: collect the window. With a baseline, catch up on
+            # everything since it (so no gap goes unexamined); otherwise take the
+            # newest N frames.
+            if last_analyzed_ts is not None:
+                frames = redis_handler.get_frames_since(
+                    subsampled_key, last_analyzed_ts, max_count=subsampled_stream_maxlen
+                )
+                if frames and frames[0].timestamp > last_analyzed_ts:
+                    logger.warning(
+                        "Subsampled stream does not cover the full gap since the last "
+                        "analysis; increase subsampled_stream_maxlen",
+                        needed=max_interval_seconds,
+                        maxlen=subsampled_stream_maxlen,
+                    )
+            else:
+                frames = redis_handler.get_latest_frames(
+                    subsampled_key, num_frames_to_process
+                )
+
+            if not frames:
+                frames = [newest_frame]
+
+            motion_score = (
+                frame_diff_score(last_analyzed_frame_data, newest_frame.frame_data)
+                if last_analyzed_frame_data is not None
+                else None
+            )
+            logger.info(
+                "Analyzing frames from stream",
+                num_frames=len(frames),
+                motion_score=motion_score,
+            )
+
+            last_call_monotonic = time.monotonic()
             result = nanny_watcher.process_frames(frames)
 
             if result["success"]:
-                # Log the result
                 alert_status = (
                     "🚨 ALERT TRIGGERED"
                     if result["should_alert"]
@@ -140,6 +210,8 @@ def run_watcher(
                     alert_status=alert_status,
                     awareness_level=awareness,
                     reasoning=result["reasoning"],
+                    images_sent=result.get("images_sent"),
+                    frames_skipped=result.get("frames_skipped"),
                 )
 
                 # Stream logs back to Redis
@@ -150,6 +222,10 @@ def run_watcher(
                     "reasoning": result["reasoning"],
                 }
                 redis_handler.add_logs(logs_key, log_data)
+
+                # Advance the baseline only on success.
+                last_analyzed_frame_data = bytes(frames[-1].frame_data)
+                last_analyzed_ts = frames[-1].timestamp
 
                 if result["should_alert"]:
                     _play_alert()
@@ -164,7 +240,7 @@ def run_watcher(
                 }
                 redis_handler.add_logs(logs_key, error_data)
 
-                time.sleep(0.3)
+                time.sleep(NO_FRAMES_SLEEP_SECONDS)
 
     except KeyboardInterrupt:
         logger.info("Watcher stopped by user")
@@ -237,6 +313,10 @@ if __name__ == "__main__":
             num_frames_to_process=num_frames_to_process,
             api_mode=LLM_API_MODE,
             redis_password=REDIS_PASSWORD,
+            motion_threshold=room_config.motion_threshold,
+            min_interval_seconds=room_config.min_interval_seconds,
+            max_interval_seconds=room_config.max_interval_seconds,
+            subsampled_stream_maxlen=room_config.subsampled_stream_maxlen,
         )
     except FileNotFoundError:
         logger.error(f"Configuration file not found: {args.config_file}")

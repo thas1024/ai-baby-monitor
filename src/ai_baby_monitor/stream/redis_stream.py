@@ -151,6 +151,30 @@ class RedisStreamHandler:
 
         return frames
 
+    def get_frames_since(
+        self, key: str, since_ts: dt.datetime, max_count: int = 100
+    ) -> list[Frame]:
+        """Get the newest frames newer than ``since_ts``, chronological, capped at ``max_count``.
+
+        Used for gate-open catch-up: after a skipped cycle we want everything since
+        the last analyzed window, not just the newest N frames. Redis stream IDs
+        are millisecond timestamps, so we can seek directly. ``xrevrange`` returns
+        newest-first, so we take the newest ``max_count`` and reverse to keep
+        chronological order (matching ``get_latest_frames``).
+        """
+        min_id = f"{int(since_ts.timestamp() * 1000)}-0"
+        entries = self.redis_client.xrevrange(
+            name=key, max="+", min=min_id, count=max_count
+        )[::-1]
+
+        frames = []
+        for entry_id, data in entries:
+            frame = self.deserialize_frame(data)
+            if frame:
+                frames.append(frame)
+
+        return frames
+
     def get_latest_logs(
         self, key: str, count: int = 1, last_log_id: str | None = None
     ) -> list[dict]:

@@ -1,3 +1,5 @@
+import datetime as dt
+
 from ai_baby_monitor.i18n import get_language
 
 # The JSON field names (should_alert, reasoning, recommended_awareness_level)
@@ -41,3 +43,45 @@ def get_instructions_prompt(instructions: list[str], language: str | None = None
 
     instructions_str = "\n".join(["* " + _ for _ in instructions])
     return template.format(instructions=instructions_str)
+
+
+# Per-image / per-skip time annotations interleaved with the frames. Kept
+# language-aware so the model sees the note in the same language it answers in.
+_FRAME_ANNOTATION = {
+    "en": "[frame {index} @ {ts}]",
+    "zh": "[帧{index} @ {ts}]",
+}
+_SKIPPED_ANNOTATION = {
+    "en": "[skipped {count} frames: {start} -> {end} (no visible change)]",
+    "zh": "[跳过 {count} 帧：{start} → {end}（画面无明显变化）]",
+}
+
+
+def _format_timestamp(timestamp: dt.datetime) -> str:
+    """Format to millisecond precision (no timezone math — timestamps are local)."""
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def format_frame_annotation(
+    index: int, timestamp: dt.datetime, language: str | None = None
+) -> str:
+    """Annotation placed before a frame image, e.g. ``[帧1 @ 2026-10-14 12:00:00.000]``."""
+    language = language or get_language()
+    template = _FRAME_ANNOTATION.get(language, _FRAME_ANNOTATION["en"])
+    return template.format(index=index + 1, ts=_format_timestamp(timestamp))
+
+
+def format_skipped_annotation(
+    count: int,
+    start_ts: dt.datetime,
+    end_ts: dt.datetime,
+    language: str | None = None,
+) -> str:
+    """Annotation replacing a run of unchanged frames (no image is sent)."""
+    language = language or get_language()
+    template = _SKIPPED_ANNOTATION.get(language, _SKIPPED_ANNOTATION["en"])
+    return template.format(
+        count=count,
+        start=_format_timestamp(start_ts),
+        end=_format_timestamp(end_ts),
+    )

@@ -66,6 +66,20 @@ Endpoints differ in structured-output support, so `Watcher._create_completion` t
 
 `_request` / `_build_response_format` / `_consume_response_stream` branch on `api_mode`. `_calculate_fps` is retained as a utility but is no longer used by the request path (frames are sent as individual images, not a vLLM video blob).
 
+### Motion gating & request throttling
+
+`src/ai_baby_monitor/motion.py` (pure functions, no Redis/config) controls how often the model is called and how many images each request carries:
+
+- `frame_diff_score` / `frames_are_similar` — difference between two JPEG frames on a pinned pipeline (grayscale → 160x90 → Gaussian blur → mean abs diff). Byte-identical → 0.0; undecodable → `inf` (treated as "changed", never raises). `threshold <= 0` disables comparison.
+- `build_timeline(frames, threshold)` — the first frame is always an image anchor; each later frame is compared to the **last included** frame (slow drift accumulates); near-identical runs collapse into a `SkippedItem`. A window always yields ≥1 image.
+- `should_analyze(...)` — the cycle gate: call when the newest frame differs from the last analyzed frame, or when the heartbeat (`max_interval_seconds`) elapses, floored by `min_interval_seconds`. `threshold <= 0` or no baseline → always call.
+
+`Watcher._build_content` turns the timeline into protocol-neutral `TextPart`/`ImagePart` (each image is preceded by a `[frame N @ <time>]` annotation; skipped runs become a text note with no image). `_request` maps parts to chat/responses content. `run_watcher.py` holds the gate state:
+
+- baseline = the last frame of the last **successful** window (a failed call is retried next cycle);
+- interval timing uses `time.monotonic()`, not frame timestamps;
+- when the gate opens it fetches frames **since the last analyzed window** (`RedisStreamHandler.get_frames_since`) so no gap is skipped — capped by `subsampled_stream_maxlen`, and it warns if that cap truncates the gap.
+
 ### Localization (i18n)
 
 User-facing text is bilingual, selected by `APP_LANG` (`zh` default, or `en`).
@@ -87,7 +101,7 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 ### Config
 
-`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. Required top-level keys: `name`, `camera.uri`, `instructions`. Optional camera keys (`subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `num_frames_to_process`) fall back to dataclass defaults when absent — the loader only passes keys present in the YAML. `camera_uri` is a string in YAML ("0" for webcam index, or an RTSP URL); `stream_to_redis.py` converts all-digit URIs to `int`.
+`RoomConfig` (`config/utils.py`, a `slots=True, kw_only=True` dataclass) is loaded from `configs/*.yaml`. Required top-level keys: `name`, `camera.uri`, `instructions`. Optional camera keys (`subsampled_stream_maxlen`, `frame_width`, `frame_height`, `subsample_rate`, `num_frames_to_process`, `motion_threshold`, `min_interval_seconds`, `max_interval_seconds`) fall back to dataclass defaults when absent — the loader only passes keys present in the YAML. `camera_uri` is a string in YAML ("0" for webcam index, or an RTSP URL); `stream_to_redis.py` converts all-digit URIs to `int`. The motion knobs are per-room (cameras differ); see "Motion gating & request throttling".
 
 ### Adding a room (touches several places)
 
@@ -112,3 +126,6 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 - `RedisStreamHandler.get_latest_entries` uses `xrevrange` (newest-first) and reverses the result to return chronological order — the reversal is intentional and asserted by tests.
 - `run_watcher.py` exits(1) if `instructions` is empty or if any `LLM_*` env var is missing.
 - The alert sound path is `assets/alert.wav` relative to CWD; run the watcher from the repo root. It is skipped entirely when `ALERT_SOUND_ENABLED=false`.
+- Motion gating changes behavior by design: (1) it suppresses repeat `should_alert` beeps while a violation persists (the model is only re-asked when motion/heartbeat allows); (2) a static scene is only re-evaluated at the heartbeat cadence; (3) an event that occurs and resolves entirely inside a skipped gap is invisible. `motion_threshold: 0` restores the old "send everything, call every cycle" behavior.
+- `motion_threshold` is not portable across cameras (AGC/IR/compression shift the noise floor). Every analyze logs `motion_score`; to calibrate, run on an empty room with gating off and set the threshold just above the idle noise. For a safety monitor, prefer false positives (lower threshold) and rely on `min_interval_seconds` for cost control.
+- `subsampled_stream_maxlen` must cover `max_interval_seconds` at the subsampled frame rate, otherwise catch-up after a long heartbeat truncates the gap; the watcher warns ("does not cover the full gap") when this happens.

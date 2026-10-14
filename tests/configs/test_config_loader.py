@@ -60,7 +60,7 @@ def test_load_room_config_file_with_partial_optional_fields(tmp_path: Path):
 
     # Check that other optional fields keep their defaults
     assert config.frame_height == 360  # default
-    assert config.subsampled_stream_maxlen == 64  # default
+    assert config.subsampled_stream_maxlen == 128  # default
     assert config.subsample_rate == 4  # default
     assert config.instructions == []  # default
 
@@ -80,3 +80,28 @@ def test_camera_uri_missing_env_var_raises(tmp_path: Path, monkeypatch):
     config_path.write_text(yaml.safe_dump(sample))
     with pytest.raises(ValueError, match="CAMERA_URI"):
         load_room_config_file(config_path)
+
+
+def test_motion_settings_defaults():
+    config = RoomConfig(name="r", camera_uri="0")
+    assert config.motion_threshold == 3.0
+    assert config.min_interval_seconds == 10.0
+    assert config.max_interval_seconds == 30.0
+
+
+def test_motion_settings_from_yaml(tmp_path: Path):
+    sample = {
+        "name": "r",
+        "camera": {
+            "uri": "0",
+            "motion_threshold": 5.5,
+            "min_interval_seconds": 20,
+            "max_interval_seconds": 120,
+        },
+    }
+    config_path = tmp_path / "r.yaml"
+    config_path.write_text(yaml.safe_dump(sample))
+    config = load_room_config_file(config_path)
+    assert config.motion_threshold == 5.5
+    assert config.min_interval_seconds == 20
+    assert config.max_interval_seconds == 120

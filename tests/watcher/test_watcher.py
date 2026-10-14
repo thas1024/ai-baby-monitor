@@ -9,6 +9,7 @@ import datetime
 from types import SimpleNamespace
 
 import httpx
+import cv2
 import numpy as np
 from openai import BadRequestError
 
@@ -256,9 +257,12 @@ def test_process_frames_chat_completions_uses_json_schema():
 
     kwargs = watcher.client.chat.completions.create.call_args.kwargs
     assert kwargs["response_format"]["type"] == "json_schema"
-    # Frames are sent as individual images, not a vLLM video blob.
+    # Frames are sent as individual image parts, each preceded by a time annotation.
     user_content = kwargs["messages"][1]["content"]
-    assert user_content[0]["type"] == "image_url"
+    image_parts = [p for p in user_content if p["type"] == "image_url"]
+    assert image_parts
+    first_image_idx = next(i for i, p in enumerate(user_content) if p["type"] == "image_url")
+    assert user_content[first_image_idx - 1]["type"] == "text"
 
 
 def test_process_frames_falls_back_when_json_schema_rejected():
@@ -296,7 +300,9 @@ def test_process_frames_responses_mode():
     assert kwargs["stream"] is True
     assert kwargs["text"]["format"]["type"] == "json_schema"
     user_content = kwargs["input"][1]["content"]
-    assert user_content[0]["type"] == "input_image"
+    assert any(p["type"] == "input_image" for p in user_content)
+    first_image_idx = next(i for i, p in enumerate(user_content) if p["type"] == "input_image")
+    assert user_content[first_image_idx - 1]["type"] == "input_text"
     # Chat completions endpoint was not touched.
     watcher.client.chat.completions.create.assert_not_called()
 
@@ -306,3 +312,79 @@ def test_process_frames_no_frames():
     result = watcher.process_frames([])
     assert result["success"] is False
     assert "No frames provided" in result["error"]
+
+
+# --- motion compression + time annotations ---
+
+def _real_jpeg(seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    image = (rng.random((90, 160, 3)) * 255).astype("uint8")
+    ok, buffer = cv2.imencode(".jpg", image)
+    assert ok
+    return buffer
+
+
+def _frame_with(jpeg, second: int = 0) -> Frame:
+    return Frame(
+        frame_data=jpeg,
+        timestamp=datetime.datetime(2026, 1, 1, 12, 0, second),
+        frame_idx=second,
+    )
+
+
+def test_process_frames_compresses_unchanged_frames():
+    watcher = Watcher(instructions=["Test"], motion_threshold=3.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    jpeg = _real_jpeg(1)
+    frames = [_frame_with(jpeg.copy(), i) for i in range(4)]
+
+    result = watcher.process_frames(frames)
+
+    assert result["success"] is True
+    assert result["images_sent"] == 1
+    assert result["frames_skipped"] == 3
+
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert len([p for p in content if p["type"] == "image_url"]) == 1
+    texts = " ".join(p["text"] for p in content if p["type"] == "text")
+    assert "3" in texts  # skip note mentions the 3 collapsed frames
+
+
+def test_process_frames_threshold_zero_sends_every_frame():
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    jpeg = _real_jpeg(1)
+    frames = [_frame_with(jpeg.copy(), i) for i in range(4)]
+
+    result = watcher.process_frames(frames)
+
+    assert result["images_sent"] == 4
+    assert result["frames_skipped"] == 0
+
+
+def test_frame_annotation_is_prepended_to_image():
+    watcher = Watcher(instructions=["Test"], motion_threshold=0.0)
+    watcher.client = MagicMock()
+    watcher.client.chat.completions.create.return_value = _chat_response(VALID_JSON)
+
+    watcher.process_frames([_frame_with(_real_jpeg(1))])
+
+    content = watcher.client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    # first part is the annotation, second is the image
+    assert content[0]["type"] == "text"
+    assert "2026-01-01" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+
+
+def test_skipped_annotation_chinese_by_default(monkeypatch):
+    monkeypatch.delenv("APP_LANG", raising=False)
+    from ai_baby_monitor.watcher import format_skipped_annotation
+
+    text = format_skipped_annotation(
+        3, datetime.datetime(2026, 1, 1, 12, 0, 0), datetime.datetime(2026, 1, 1, 12, 0, 1)
+    )
+    assert "跳过 3 帧" in text

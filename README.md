@@ -88,6 +88,11 @@ instructions:          # natural‑language rules for the nanny model
 
 * **Multiple rooms**? Edit `docker-compose.yml` and add a `stream_to_redis` and a `watcher` service per room. Pass the new room config to the streamlit viewer.
 * **Swap the model / backend**? Set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_NAME` in `.env` to point at any OpenAI‑compatible vision endpoint. Set `LLM_API_MODE=responses` to use the OpenAI Responses API instead of the default Chat Completions API. To fall back to local inference, run `docker compose --profile local up -d` and set `LLM_BASE_URL=http://localhost:8000/v1`.
+* **Cut cost / requests**? The watcher only calls the model when the picture actually changes, plus a heartbeat. Per‑room knobs (under `camera:`): `motion_threshold` (mean pixel diff above which a frame counts as changed; `0` disables gating and sends every frame), `min_interval_seconds` (rate floor), `max_interval_seconds` (heartbeat). Changed frames are sent as annotated images (`[frame N @ <time>]`); unchanged runs are sent as a text note only, so a request usually carries far fewer than `num_frames_to_process` images. See "Motion gating" below.
+
+### Motion gating & tuning
+
+`ai_baby_monitor/motion.py` decides *whether* to call the model (compare the newest frame to the last analyzed one; call on change or heartbeat) and *which* frames to send (only the changed ones — unchanged runs become a `[skipped N frames: … (no visible change)]` note). Every analyze logs `motion_score`; `motion_threshold` is camera‑specific — run on an empty room with gating off and set the threshold just above the idle noise. For a safety monitor, prefer false positives (lower threshold) and use `min_interval_seconds` for cost control. `subsampled_stream_maxlen` must cover `max_interval_seconds` at the subsampled frame rate (the watcher warns otherwise).
 
 ---
 
@@ -97,7 +102,7 @@ instructions:          # natural‑language rules for the nanny model
 ---
 
 1. **`stream_to_redis.py`** captures frames and pushes them to Redis (short *realtime* & long *subsampled* frames queues).
-2. **`run_watcher.py`** pulls latest N frames, encodes instructions and frames into prompt and sends them to the OpenAI‑compatible endpoint, receives structured JSON, writes logs & plays a beep if receives `should_alert = True`.
+2. **`run_watcher.py`** waits for the picture to change (motion gating) or a heartbeat, then sends only the changed frames — each time‑annotated — to the OpenAI‑compatible endpoint, receives structured JSON, writes logs & plays a beep if it receives `should_alert = True`.
 3. **Streamlit** live‑updates the latest frame + llm logs.
 
 ---

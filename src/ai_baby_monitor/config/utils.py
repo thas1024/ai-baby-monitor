@@ -29,11 +29,18 @@ class RoomConfig:
     name: str
     camera_uri: str
     instructions: list[str] = field(default_factory=list)
-    subsampled_stream_maxlen: int = 64
+    # Retention must cover max_interval_seconds at the subsampled frame rate
+    # (~2.9 fps here → 128 frames ≈ 44s), or catch-up cannot see the whole gap.
+    subsampled_stream_maxlen: int = 128
     frame_width: int = 640
     frame_height: int = 360
     subsample_rate: int = 4
     num_frames_to_process: int = 16
+    # Motion gating / request throttling (see docs and motion.py). A threshold of
+    # 0 disables gating and intra-window compression (send every frame, always call).
+    motion_threshold: float = 3.0
+    min_interval_seconds: float = 10.0
+    max_interval_seconds: float = 30.0
 
     def __str__(self):
         return self.name
@@ -56,8 +63,8 @@ def load_room_config_file(config_path: str | Path) -> RoomConfig:
             "instructions": data.get("instructions", []),
             
             # Optional fields (only include if specified in YAML)
-            **{k: data["camera"][k] for k in 
-               ["subsampled_stream_maxlen", "frame_width", "frame_height", "subsample_rate", "num_frames_to_process"]
+            **{k: data["camera"][k] for k in
+               ["subsampled_stream_maxlen", "frame_width", "frame_height", "subsample_rate", "num_frames_to_process", "motion_threshold", "min_interval_seconds", "max_interval_seconds"]
                if k in data["camera"]}
         }
         

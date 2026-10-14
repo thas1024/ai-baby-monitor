@@ -3,6 +3,12 @@ name: "living_room"
 camera:
   # Camera RTSP URL (with credentials) lives in .env as CAMERA_URI, not here.
   uri: "${CAMERA_URI}"
+  # Request throttling (optional; defaults shown). motion_threshold=0 disables
+  # gating and per-frame compression entirely (send every frame, call every cycle).
+  # motion_threshold: 3.0        # mean pixel diff (0-255) above which a frame is "changed"
+  # min_interval_seconds: 10.0   # minimum seconds between model calls
+  # max_interval_seconds: 30.0   # heartbeat: analyze at least this often even with no motion
+  # subsampled_stream_maxlen: 128 # must cover max_interval (>= fps * max_interval)
 
 instructions:
   - "宝宝不能做任何危险的动作。"
