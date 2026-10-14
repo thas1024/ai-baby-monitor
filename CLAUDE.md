@@ -8,7 +8,7 @@ A baby monitor. A camera stream is pushed to Redis, a vision LLM checks the fram
 
 The vision backend is any **OpenAI-compatible endpoint** (cloud or custom), selected via `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_NAME` / `LLM_API_MODE` in `.env`. A local vLLM (Qwen2.5-VL) service is kept as an optional compose profile for offline/self-hosted use, but is **not** started by default.
 
-Redis is also **external** (not managed by compose) — point `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` at an existing instance.
+Redis runs as a compose service (`redis:7-alpine`, host port **16379** → 6379, persisted in the `redis-data` volume). Bridge services reach it as `redis:6379`; the host-networked watcher reaches it as `127.0.0.1:16379` (set in its service `environment`). Point `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` elsewhere if you'd rather use an external Redis.
 
 ## Commands
 
@@ -16,9 +16,8 @@ Redis is also **external** (not managed by compose) — point `REDIS_HOST` / `RE
 # Install deps (uv manages the venv; Python 3.12, .python-version)
 uv sync
 
-# Run the stack in Docker (stream_to_redis, streamlit, watcher) — no GPU needed.
-# Requires an external Redis reachable at REDIS_HOST:REDIS_PORT (see .env).
-cp .env.template .env        # first time; fill in REDIS_* and LLM_*; .env is gitignored
+# Run the stack in Docker (redis, stream_to_redis, streamlit, watcher) — no GPU needed.
+cp .env.template .env        # first time; fill in CAMERA_URI and LLM_*; .env is gitignored
 docker compose up -d --build
 
 # Optional local inference backend (GPU), instead of a cloud endpoint
@@ -97,7 +96,7 @@ Streamlit reads frames/logs back and renders them. The historic-logs view is a *
 
 ### Watcher
 
-`scripts/run_watcher.py` runs either in Docker (the `watcher` compose service, default) or on the host. It reads `REDIS_HOST` from `.env`. Redis is external and addressed the same way from both places.
+`scripts/run_watcher.py` runs either in Docker (the `watcher` compose service, default) or on the host. It reads `REDIS_HOST` / `REDIS_PORT` from the environment (the compose service overrides them to `127.0.0.1:16379` because it is host-networked). The main loop is wrapped in a restart-on-error loop with a short backoff, so a dependency (Redis or the LLM endpoint) that is slow to come up at boot does not kill the watcher.
 
 The only reason to run it on the host is the alert beep: `_play_alert()` plays `assets/alert.wav` on a violation, and containers have no audio output. It is controlled by `ALERT_SOUND_ENABLED` (default true; the compose service sets it to `false`). `_play_alert` never raises — a missing audio backend (headless host) is caught and logged, so the watcher keeps running.
 
@@ -118,9 +117,9 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 `Dockerfile.python` builds a shared `python-base` service; `stream_to_redis`, `streamlit_viewer` and `watcher` `extends:` it. The image is `python:3.12-slim-bookworm` + `uv`; `ffmpeg libsm6 libxext6` are apt-installed (needed by OpenCV — removing them breaks `cv2`). `./scripts`, `./configs`, and `./src` are bind-mounted, so script/src/config edits don't require a rebuild.
 
-`python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It has no `depends_on` (Redis is external). `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
+`python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It `depends_on: [redis]`. `redis`, `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
 
-`.env` is gitignored; `.env.template` is the tracked source of truth for required variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `CAMERA_DECODE`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
+`.env` is gitignored; `.env.template` is the tracked source of truth for the variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `CAMERA_DECODE`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
 
 ### Frame decoding (CPU vs Intel GPU)
 

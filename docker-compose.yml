@@ -1,7 +1,20 @@
 services:
-  # NOTE: Redis is NOT managed here — the app uses an external Redis (e.g. one
-  # already running on the host). Point REDIS_HOST/REDIS_PORT/REDIS_PASSWORD at
-  # it in .env. Containers can reach the host's IP directly on a bridge network.
+  # Redis for the app. Runs inside compose so the stack is self-contained; the
+  # port is published on 16379 (host) to avoid clashing with any Redis already
+  # on 6379. Bridge services reach it as `redis:6379`; the host-networked watcher
+  # reaches it as 127.0.0.1:16379 (see the watcher `environment` below).
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c 'exec redis-server --appendonly yes
+      ${REDIS_PASSWORD:+--requirepass "${REDIS_PASSWORD}"}'
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - app-network
 
   # Optional local inference backend. Not started by default — by default the
   # watcher calls a cloud / custom OpenAI-compatible endpoint (see LLM_BASE_URL
@@ -52,6 +65,8 @@ services:
       - .env
     command: ["sleep", "infinity"]
     restart: unless-stopped
+    depends_on:
+      - redis
     volumes:
       - ./scripts:/app/scripts
       - ./configs:/app/configs
@@ -101,6 +116,10 @@ services:
     environment:
       # Containers have no audio output; suppress the beep.
       - ALERT_SOUND_ENABLED=false
+      # Host-networked, so reach the compose `redis` container via its published
+      # host port rather than the service name.
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=16379
     command: >
       sh -c "
       uv run python scripts/run_watcher.py --config-file configs/living_room.yaml
@@ -121,4 +140,7 @@ services:
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  redis-data:
 

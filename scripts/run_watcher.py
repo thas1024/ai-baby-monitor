@@ -134,208 +134,213 @@ def run_watcher(
     # Leading-edge tracking for the "no live video" health event.
     blank_active = False
 
-    try:
-        while True:
-            now_monotonic = time.monotonic()
+    while True:
+        try:
+            while True:
+                now_monotonic = time.monotonic()
 
-            # Gather each camera's newest frame and evaluate its own motion gate.
-            newest = {}
-            any_gate_open = False
-            for cam in cameras:
-                latest = redis_handler.get_latest_frames(subsampled_keys[cam.name], 1)
-                if not latest:
-                    continue
-                newest[cam.name] = latest[0]
-                if should_analyze(
-                    latest[0].frame_data,
-                    state[cam.name]["frame_data"],
-                    now_monotonic,
-                    last_call_monotonic,
-                    cam.motion_threshold,
-                    min_interval_seconds,
-                    max_interval_seconds,
-                    cam.motion_metric,
-                ):
-                    any_gate_open = True
-
-            if not newest:
-                logger.warning(
-                    "No frames available in any camera stream", room=room_name
-                )
-                time.sleep(NO_FRAMES_SLEEP_SECONDS)
-                continue
-
-            # Apply the room-wide rate floor here, outside the per-camera OR, so a
-            # camera with no baseline can't bypass it (should_analyze returns True
-            # before the floor check when the baseline is missing).
-            floor_elapsed = last_call_monotonic is None or (
-                now_monotonic - last_call_monotonic >= min_interval_seconds
-            )
-            if not any_gate_open or not floor_elapsed:
-                time.sleep(WATCHER_POLL_SECONDS)
-                continue
-
-            # Gate is open: fetch every camera's window so the merged request is a
-            # coherent room snapshot. With a baseline, catch up since it (no gap
-            # skipped); otherwise take the newest N frames.
-            windows: list[CameraWindow] = []
-            motion_scores: dict[str, float | None] = {}
-            for cam in cameras:
-                if cam.name not in newest:
-                    continue
-                key = subsampled_keys[cam.name]
-                if state[cam.name]["ts"] is not None:
-                    frames = redis_handler.get_frames_since(
-                        key,
-                        state[cam.name]["ts"],
-                        max_count=cam.subsampled_stream_maxlen,
-                    )
-                    if frames and frames[0].timestamp > state[cam.name]["ts"]:
-                        logger.warning(
-                            "Subsampled stream does not cover the full gap since the "
-                            "last analysis; increase subsampled_stream_maxlen",
-                            camera=cam.name,
-                            needed=max_interval_seconds,
-                            maxlen=cam.subsampled_stream_maxlen,
-                        )
-                else:
-                    frames = redis_handler.get_latest_frames(
-                        key, cam.num_frames_to_process or num_frames_to_process
-                    )
-                if not frames:
-                    frames = [newest[cam.name]]
-
-                motion_scores[cam.name] = (
-                    frame_diff_score(
+                # Gather each camera's newest frame and evaluate its own motion gate.
+                newest = {}
+                any_gate_open = False
+                for cam in cameras:
+                    latest = redis_handler.get_latest_frames(subsampled_keys[cam.name], 1)
+                    if not latest:
+                        continue
+                    newest[cam.name] = latest[0]
+                    if should_analyze(
+                        latest[0].frame_data,
                         state[cam.name]["frame_data"],
-                        newest[cam.name].frame_data,
+                        now_monotonic,
+                        last_call_monotonic,
+                        cam.motion_threshold,
+                        min_interval_seconds,
+                        max_interval_seconds,
                         cam.motion_metric,
-                    )
-                    if state[cam.name]["frame_data"] is not None
-                    else None
-                )
-                windows.append(
-                    CameraWindow(
-                        frames=frames,
-                        name=cam.name,
-                        motion_metric=cam.motion_metric,
-                        motion_threshold=cam.motion_threshold,
-                        night_threshold=cam.night_saturation_threshold,
-                    )
-                )
+                    ):
+                        any_gate_open = True
 
-            # Drop cameras whose current frame is flat/blank — a dead feed. Don't
-            # send a useless gray frame to the model, don't advance its baseline.
-            dead_cameras = [
-                w.name for w in windows if is_blank_frame(w.frames[-1].frame_data)
-            ]
-            if dead_cameras:
-                logger.warning("Cameras with no signal (blank frames)", cameras=dead_cameras)
-                windows = [w for w in windows if w.name not in dead_cameras]
+                if not newest:
+                    logger.warning(
+                        "No frames available in any camera stream", room=room_name
+                    )
+                    time.sleep(NO_FRAMES_SLEEP_SECONDS)
+                    continue
 
-            # Only record the "no live video" health event on the leading edge (and
-            # a matching recovery), so a long outage does not flood the logs stream.
-            if not windows:
-                logger.warning("All cameras blank; skipping analysis", room=room_name)
-                if not blank_active:
-                    blank_active = True
+                # Apply the room-wide rate floor here, outside the per-camera OR, so a
+                # camera with no baseline can't bypass it (should_analyze returns True
+                # before the floor check when the baseline is missing).
+                floor_elapsed = last_call_monotonic is None or (
+                    now_monotonic - last_call_monotonic >= min_interval_seconds
+                )
+                if not any_gate_open or not floor_elapsed:
+                    time.sleep(WATCHER_POLL_SECONDS)
+                    continue
+
+                # Gate is open: fetch every camera's window so the merged request is a
+                # coherent room snapshot. With a baseline, catch up since it (no gap
+                # skipped); otherwise take the newest N frames.
+                windows: list[CameraWindow] = []
+                motion_scores: dict[str, float | None] = {}
+                for cam in cameras:
+                    if cam.name not in newest:
+                        continue
+                    key = subsampled_keys[cam.name]
+                    if state[cam.name]["ts"] is not None:
+                        frames = redis_handler.get_frames_since(
+                            key,
+                            state[cam.name]["ts"],
+                            max_count=cam.subsampled_stream_maxlen,
+                        )
+                        if frames and frames[0].timestamp > state[cam.name]["ts"]:
+                            logger.warning(
+                                "Subsampled stream does not cover the full gap since the "
+                                "last analysis; increase subsampled_stream_maxlen",
+                                camera=cam.name,
+                                needed=max_interval_seconds,
+                                maxlen=cam.subsampled_stream_maxlen,
+                            )
+                    else:
+                        frames = redis_handler.get_latest_frames(
+                            key, cam.num_frames_to_process or num_frames_to_process
+                        )
+                    if not frames:
+                        frames = [newest[cam.name]]
+
+                    motion_scores[cam.name] = (
+                        frame_diff_score(
+                            state[cam.name]["frame_data"],
+                            newest[cam.name].frame_data,
+                            cam.motion_metric,
+                        )
+                        if state[cam.name]["frame_data"] is not None
+                        else None
+                    )
+                    windows.append(
+                        CameraWindow(
+                            frames=frames,
+                            name=cam.name,
+                            motion_metric=cam.motion_metric,
+                            motion_threshold=cam.motion_threshold,
+                            night_threshold=cam.night_saturation_threshold,
+                        )
+                    )
+
+                # Drop cameras whose current frame is flat/blank — a dead feed. Don't
+                # send a useless gray frame to the model, don't advance its baseline.
+                dead_cameras = [
+                    w.name for w in windows if is_blank_frame(w.frames[-1].frame_data)
+                ]
+                if dead_cameras:
+                    logger.warning("Cameras with no signal (blank frames)", cameras=dead_cameras)
+                    windows = [w for w in windows if w.name not in dead_cameras]
+
+                # Only record the "no live video" health event on the leading edge (and
+                # a matching recovery), so a long outage does not flood the logs stream.
+                if not windows:
+                    logger.warning("All cameras blank; skipping analysis", room=room_name)
+                    if not blank_active:
+                        blank_active = True
+                        redis_handler.add_logs(
+                            logs_key,
+                            {
+                                "timestamp": time.time(),
+                                "error": "no live video: all cameras returned blank/flat "
+                                "frames (stream likely failed)",
+                            },
+                        )
+                    # Throttle these polls to the room's min interval.
+                    last_call_monotonic = time.monotonic()
+                    time.sleep(WATCHER_POLL_SECONDS)
+                    continue
+
+                if blank_active:
+                    blank_active = False
                     redis_handler.add_logs(
                         logs_key,
-                        {
-                            "timestamp": time.time(),
-                            "error": "no live video: all cameras returned blank/flat "
-                            "frames (stream likely failed)",
-                        },
+                        {"timestamp": time.time(), "info": "video restored (live frames again)"},
                     )
-                # Throttle these polls to the room's min interval.
-                last_call_monotonic = time.monotonic()
-                time.sleep(WATCHER_POLL_SECONDS)
-                continue
-
-            if blank_active:
-                blank_active = False
-                redis_handler.add_logs(
-                    logs_key,
-                    {"timestamp": time.time(), "info": "video restored (live frames again)"},
-                )
-
-            logger.info(
-                "Analyzing cameras",
-                cameras=[w.name for w in windows],
-                num_frames={w.name: len(w.frames) for w in windows},
-                motion_scores=motion_scores,
-            )
-
-            last_call_monotonic = time.monotonic()
-            result = nanny_watcher.process_room(windows)
-
-            if result["success"]:
-                alert_status = (
-                    "🚨 ALERT TRIGGERED"
-                    if result["should_alert"]
-                    else "✅ No alert needed"
-                )
-                awareness = result["recommended_awareness_level"]
-                night_mode = bool(result.get("night_mode"))
 
                 logger.info(
-                    "Alert status and reasoning",
-                    alert_status=alert_status,
-                    awareness_level=awareness,
-                    night_mode=night_mode,
-                    reasoning=result["reasoning"],
-                    images_sent=result.get("images_sent"),
-                    frames_skipped=result.get("frames_skipped"),
+                    "Analyzing cameras",
+                    cameras=[w.name for w in windows],
+                    num_frames={w.name: len(w.frames) for w in windows},
+                    motion_scores=motion_scores,
                 )
 
-                # Stream the verdict + a representative thumbnail per camera.
-                log_data: dict = {
-                    "timestamp": time.time(),
-                    "should_alert": int(result["should_alert"]),
-                    "awareness_level": awareness,
-                    "reasoning": result["reasoning"],
-                    "night_mode": int(night_mode),
-                }
-                for window in windows:
-                    last_frame = window.frames[-1]
-                    thumb_field = "frame" if window.name is None else f"frame__{window.name}"
-                    ts_field = (
-                        "frame_timestamp"
-                        if window.name is None
-                        else f"frame_timestamp__{window.name}"
+                last_call_monotonic = time.monotonic()
+                result = nanny_watcher.process_room(windows)
+
+                if result["success"]:
+                    alert_status = (
+                        "🚨 ALERT TRIGGERED"
+                        if result["should_alert"]
+                        else "✅ No alert needed"
                     )
-                    log_data[ts_field] = last_frame.timestamp.isoformat()
-                    thumbnail = encode_thumbnail(last_frame.frame_data)
-                    if thumbnail is not None:
-                        log_data[thumb_field] = thumbnail
-                redis_handler.add_logs(logs_key, log_data)
+                    awareness = result["recommended_awareness_level"]
+                    night_mode = bool(result.get("night_mode"))
 
-                # Advance every contributing camera's baseline (only on success).
-                for window in windows:
-                    state[window.name]["frame_data"] = bytes(window.frames[-1].frame_data)
-                    state[window.name]["ts"] = window.frames[-1].timestamp
+                    logger.info(
+                        "Alert status and reasoning",
+                        alert_status=alert_status,
+                        awareness_level=awareness,
+                        night_mode=night_mode,
+                        reasoning=result["reasoning"],
+                        images_sent=result.get("images_sent"),
+                        frames_skipped=result.get("frames_skipped"),
+                    )
 
-                # Debounce the beep; in night-vision mode only a HIGH-confidence
-                # violation qualifies (LOW/MEDIUM are still logged).
-                alert_worthy = is_alert_worthy(
-                    result["should_alert"], night_mode, awareness
-                )
-                recent_verdicts.append((bool(alert_worthy), time.monotonic()))
-                del recent_verdicts[:-5]
-                if alert_worthy and should_emit_alert(recent_verdicts, alert_gap_seconds):
-                    _play_alert()
-            else:
-                error_msg = result.get("error", "Unknown error")
-                logger.error("Error processing frames", error=error_msg)
-                redis_handler.add_logs(
-                    logs_key, {"timestamp": time.time(), "error": error_msg}
-                )
-                time.sleep(NO_FRAMES_SLEEP_SECONDS)
+                    # Stream the verdict + a representative thumbnail per camera.
+                    log_data: dict = {
+                        "timestamp": time.time(),
+                        "should_alert": int(result["should_alert"]),
+                        "awareness_level": awareness,
+                        "reasoning": result["reasoning"],
+                        "night_mode": int(night_mode),
+                    }
+                    for window in windows:
+                        last_frame = window.frames[-1]
+                        thumb_field = "frame" if window.name is None else f"frame__{window.name}"
+                        ts_field = (
+                            "frame_timestamp"
+                            if window.name is None
+                            else f"frame_timestamp__{window.name}"
+                        )
+                        log_data[ts_field] = last_frame.timestamp.isoformat()
+                        thumbnail = encode_thumbnail(last_frame.frame_data)
+                        if thumbnail is not None:
+                            log_data[thumb_field] = thumbnail
+                    redis_handler.add_logs(logs_key, log_data)
 
-    except KeyboardInterrupt:
-        logger.info("Watcher stopped by user")
-    except Exception as e:
-        logger.error("Error in Watcher", error=e)
+                    # Advance every contributing camera's baseline (only on success).
+                    for window in windows:
+                        state[window.name]["frame_data"] = bytes(window.frames[-1].frame_data)
+                        state[window.name]["ts"] = window.frames[-1].timestamp
+
+                    # Debounce the beep; in night-vision mode only a HIGH-confidence
+                    # violation qualifies (LOW/MEDIUM are still logged).
+                    alert_worthy = is_alert_worthy(
+                        result["should_alert"], night_mode, awareness
+                    )
+                    recent_verdicts.append((bool(alert_worthy), time.monotonic()))
+                    del recent_verdicts[:-5]
+                    if alert_worthy and should_emit_alert(recent_verdicts, alert_gap_seconds):
+                        _play_alert()
+                else:
+                    error_msg = result.get("error", "Unknown error")
+                    logger.error("Error processing frames", error=error_msg)
+                    redis_handler.add_logs(
+                        logs_key, {"timestamp": time.time(), "error": error_msg}
+                    )
+                    time.sleep(NO_FRAMES_SLEEP_SECONDS)
+
+        except KeyboardInterrupt:
+            logger.info("Watcher stopped by user")
+            break
+        except Exception as e:
+            # A transient failure (e.g. Redis or the LLM endpoint not up yet at
+            # boot) must not kill the watcher: log and retry the loop.
+            logger.error("Watcher loop error; restarting", error=str(e))
+            time.sleep(LOOP_RESTART_SECONDS)
 
 
 def parse_args():
