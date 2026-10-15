@@ -176,3 +176,22 @@ def test_per_camera_frames_fall_back_to_room_default(tmp_path: Path):
     config = load_room_config_file(config_path)
     assert config.num_frames_for(config.cameras[0]) == 12
     assert config.num_frames_for(config.cameras[1]) == 4
+
+
+def test_camera_source_keys_defaults_and_override(tmp_path: Path):
+    sample = {
+        "name": "r",
+        "cameras": [
+            {"name": "a", "uri": "rtsp://u:p@h/s"},
+            {"name": "b", "uri": "rtsp://u:p@h/s", "source": "rtsp", "channel": 2, "sdk_port": 8001},
+        ],
+    }
+    path = tmp_path / "r.yaml"
+    path.write_text(yaml.safe_dump(sample))
+    config = load_room_config_file(path)
+    assert config.cameras[0].source is None
+    assert config.cameras[0].channel == 1
+    assert config.cameras[0].sdk_port == 8000
+    assert config.cameras[1].source == "rtsp"
+    assert config.cameras[1].channel == 2
+    assert config.cameras[1].sdk_port == 8001

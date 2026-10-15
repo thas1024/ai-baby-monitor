@@ -18,6 +18,11 @@ REDIS_PORT = os.getenv("REDIS_PORT")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
 # Frame decode backend: cpu | qsv | vaapi | auto (auto prefers Intel GPU).
 CAMERA_DECODE = os.getenv("CAMERA_DECODE", "auto")
+# Frame source: auto | rtsp | hik-sdk (auto tries the Hikvision SDK, falls back to RTSP).
+CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "auto")
+# HCNetSDK device-management credentials (separate from the RTSP URL code).
+CAMERA_SDK_USER = os.getenv("CAMERA_SDK_USER") or None
+CAMERA_SDK_PASSWORD = os.getenv("CAMERA_SDK_PASSWORD") or None
 
 
 def stream_to_redis(
@@ -33,6 +38,11 @@ def stream_to_redis(
     redis_password: str | None = None,
     camera_name: str | None = None,
     decode: str = "auto",
+    source: str = "auto",
+    channel: int = 1,
+    sdk_port: int = 8000,
+    sdk_user: str | None = None,
+    sdk_password: str | None = None,
 ):
     """
     Stream camera frames to Redis short realtime and long subsampled queues.
@@ -67,8 +77,17 @@ def stream_to_redis(
             save_stream_path=save_stream_path,
             frame_shape=frame_shape,
             decode=decode,
+            source=source,
+            channel=channel,
+            sdk_port=sdk_port,
+            sdk_user=sdk_user,
+            sdk_password=sdk_password,
         )
-        logger.info("Frame decode backend", requested=decode, active=camera.decode)
+        logger.info(
+            "Camera source resolved",
+            requested=source, active=camera.source,
+            decode=camera.decode if camera.source == "rtsp" else "sdk",
+        )
 
         # Initialize Redis stream handler
         redis_handler = RedisStreamHandler(
@@ -198,6 +217,11 @@ if __name__ == "__main__":
             redis_password=REDIS_PASSWORD,
             camera_name=camera.name,
             decode=CAMERA_DECODE,
+            source=camera.source or CAMERA_SOURCE,
+            channel=camera.channel,
+            sdk_port=camera.sdk_port,
+            sdk_user=CAMERA_SDK_USER,
+            sdk_password=CAMERA_SDK_PASSWORD,
         )
     except Exception as e:
         logger.error("Failed to start streaming", error=e)

@@ -119,13 +119,21 @@ The `watcher` service uses `network_mode: host` so it can reach host-local servi
 
 `python-base` is a build-only base with no real work, so it runs `sleep infinity` (children override `command`); without a command it would exit and restart-loop. It `depends_on: [redis]`. `redis`, `stream_to_redis` and `streamlit_viewer` are on the bridge `app-network`; `watcher` is on the host network (see "Watcher"). The `vllm` service is gated behind `profiles: ["local"]` (GPU reservation, healthcheck, and `${VLLM_PORT}` live inside it) and is not created by a plain `docker compose up`.
 
-`.env` is gitignored; `.env.template` is the tracked source of truth for the variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `CAMERA_DECODE`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
+`.env` is gitignored; `.env.template` is the tracked source of truth for the variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `CAMERA_URI`, `CAMERA_DECODE`, `CAMERA_SOURCE`, `CAMERA_SDK_USER`, `CAMERA_SDK_PASSWORD`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_NAME`, `LLM_API_MODE`, `ALERT_SOUND_ENABLED`, `APP_LANG`, `APP_TZ`, `TZ`, plus `VLLM_PORT` for the local profile).
 
 ### Frame decoding (CPU vs Intel GPU)
 
 `CAMERA_DECODE` selects how `stream_to_redis` decodes frames: `cpu` (OpenCV decode), `vaapi` / `qsv` (decode on an Intel GPU via an `ffmpeg` subprocess), or `auto` (default — prefers **VAAPI**, then QSV, then CPU). `CameraStream` (`stream/camera_stream.py`) keeps the same `capture_new_frame()` interface; the GPU path pipes `bgr24` rawvideo from `ffmpeg` (`-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -vf hwdownload,format=nv12,scale=W:H,format=bgr24`), keeps only the newest frame, and restarts ffmpeg on stream end. If no Intel hardware is available (no `/dev/dri`, or ffmpeg lacks the hwaccel), `auto` falls back to `cpu`.
 
 The `stream_to_redis` service passes the GPU through: `devices: [/dev/dri:/dev/dri]` and `group_add: ["44", "105"]` (video/render gids). The image installs `libva2 libva-drm2 intel-media-va-driver vainfo`. Note: decode moves to the GPU but the 4K→target `scale` and JPEG encode stay on the CPU — on a weak CPU prefer the camera's **substream** (`Channels/102`) as well.
+
+### Frame source (RTSP vs Hikvision HCNetSDK)
+
+`CAMERA_SOURCE` picks where frames come from: `rtsp` (always RTSP, decoded per `CAMERA_DECODE`), `hik-sdk` (the Hikvision device SDK), or `auto` (default — try the SDK, fall back to RTSP). The SDK path (`src/ai_baby_monitor/stream/hik_sdk.py`) logs in on the device's private port (8000) and pulls decoded frames via `RealPlay` + PlayM4. **Every SDK failure degrades to RTSP** — missing wheel, login failure (`err=1` wrong password, `err=153` user-locked), or no frame within the start timeout — so this never hard-breaks a working RTSP setup.
+
+SDK credentials are separate from the RTSP URL code: `CAMERA_SDK_USER` / `CAMERA_SDK_PASSWORD` (blank → derive user from `CAMERA_URI`, use the RTSP password). The HCNetSDK wheel is an **optional extra** (`uv sync --extra hik`, x86_64-only) and the Dockerfile installs it plus `libstdc++6`. Load **only** `libhcnetsdk.so`; `libPlayCtrl.so` (needed only for SDK frame decode) hangs a headless loader, so its render libs are preloaded by absolute path rather than via a global `LD_LIBRARY_PATH` (which shadows system libs).
+
+Beyond frames the SDK unlocks **PTZ**, on-demand **JPEG snapshot** and camera-side **events**. `scripts/hik_control.py` is a direct CLI (`status`/`snapshot`/`ptz`/`events`). `scripts/hik_events.py` opens the alarm channel and, per event, arms a short TTL **gate** at `{room}:{camera}:gate` and appends to `{room}:{camera}:events`; `run_watcher.py` ORs `redis_handler.gate_active(gate)` into `any_gate_open` so a camera-side event wakes the analyzer immediately. The watcher itself stays SDK-free.
 
 ## Gotchas
 

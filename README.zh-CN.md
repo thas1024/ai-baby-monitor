@@ -89,6 +89,7 @@ instructions:            # 给「保姆」大模型看的自然语言规则
 * **多房间**？在 `docker-compose.yml` 里为每个房间各加一个 `stream_to_redis` 和一个 `watcher` 服务，并把新的房间配置传给 Streamlit 面板。
 * **一个房间多路摄像头**（如婴儿直拍近景 + 整个房间全景）？把房间改成 `cameras:` 列表（见 `configs/example_multi_camera.yaml`），**每路一个 `stream_to_redis` 进程**并加 `--camera NAME`，`watcher` 仍只需一个——单次请求合并所有角度、每张图标注所属摄像头，模型同时看多个视角综合判断。每路可各自设 `subsample_rate` / `motion_threshold` / 分辨率。
 * **更换模型 / 后端**？在 `.env` 里设置 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL_NAME`，指向任意 OpenAI 协议的视觉端点。设 `LLM_API_MODE=responses` 走 OpenAI Responses API，默认走 Chat Completions。想回退到本地推理，执行 `docker compose --profile local up -d`，并把 `LLM_BASE_URL=http://localhost:8000/v1`。
+* **取帧来源**？`CAMERA_SOURCE=auto|rtsp|hik-sdk`。默认 `auto`：先尝试海康 **HCNetSDK** 设备会话（云台、相机端事件、按需抓拍、经 8000 端口直接出帧），**任何失败都自动回退 RTSP**；`rtsp` 强制走 RTSP，`hik-sdk` 强制走 SDK。SDK 凭据与 RTSP 地址分开：`CAMERA_SDK_USER` / `CAMERA_SDK_PASSWORD`。需要可选依赖（`uv sync --extra hik`，仅 x86_64）。`CAMERA_DECODE=cpu|qsv|vaapi|auto`（Intel GPU 走 VAAPI）作用于 RTSP 路径。
 * **降低频率 / 省 token**？watcher 只在画面**真正变化**时才调用模型，另加心跳兜底。每个房间可调（放在 `camera:` 下）：`motion_metric`（`mean` / `grid_max` / `changed_fraction`）、`motion_threshold`（省略则用该指标的默认值，`0` 关闭门控、每帧都发）、`min_interval_seconds`（最小间隔）、`max_interval_seconds`（心跳上限）。发生变化的帧会带时间标注发送（`[帧N @ <时间>]`）；未变化的连续帧只发一条文字说明、不带图，因此单次请求的图片数通常远小于 `num_frames_to_process`。告警蜂鸣做了去抖，只在违规被确认时响一次。详见下节。
 
 ### 运动门控与调参

@@ -32,9 +32,15 @@ def room_keys(room_name: str) -> dict[str, str]:
 
 
 def camera_keys(room_name: str, camera: str | None) -> dict[str, str]:
-    """Return a camera's ``realtime``/``subsampled`` frame stream keys.
+    """Return a camera's Redis keys.
 
     ``camera=None`` (legacy unnamed camera) keeps the unscoped keys.
+
+    Keys:
+        realtime / subsampled — frame streams.
+        gate — a TTL key set on a camera-side event, used to wake the watcher.
+        events — a stream of camera-side events (motion/smart) for history/UI.
+        ptz — a command stream: UI/CLI pushes, the SDK service consumes.
     """
     if camera is None:
         base = f"{KEY_PREFIX}:{room_name}"
@@ -43,4 +49,7 @@ def camera_keys(room_name: str, camera: str | None) -> dict[str, str]:
     return {
         "realtime": f"{base}:realtime",
         "subsampled": f"{base}:subsampled",
+        "gate": f"{base}:gate",
+        "events": f"{base}:events",
+        "ptz": f"{base}:ptz",
     }

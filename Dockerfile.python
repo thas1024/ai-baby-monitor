@@ -3,8 +3,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # ffmpeg decodes RTSP; the libva/iHD packages let ffmpeg use an Intel GPU
 # (VAAPI/QSV) when /dev/dri is passed through (see docker-compose.yml).
+# libstdc++6 is needed by the HCNetSDK vendor .so files.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libsm6 libxext6 \
+        ffmpeg libsm6 libxext6 libstdc++6 \
         libva2 libva-drm2 intel-media-va-driver vainfo \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,7 +16,9 @@ COPY uv.lock uv.lock
 COPY README.md README.md
 COPY src/ src/
 
-RUN uv sync --locked 
+# --extra hik pulls the Hikvision HCNetSDK wheel (x86_64 linux); harmless to
+# include here even for services that don't use it.
+RUN uv sync --locked --extra hik
 
 COPY . .
 

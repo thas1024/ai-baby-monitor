@@ -111,6 +111,7 @@ def run_watcher(
     subsampled_keys = {
         cam.name: camera_keys(room_name, cam.name)["subsampled"] for cam in cameras
     }
+    gates = {cam.name: camera_keys(room_name, cam.name)["gate"] for cam in cameras}
     logger.info(
         "Starting Watcher monitoring Redis",
         room=room_name,
@@ -147,6 +148,10 @@ def run_watcher(
                     if not latest:
                         continue
                     newest[cam.name] = latest[0]
+                    # A camera-side event (motion/smart) armed a short gate in Redis —
+                    # treat it as "the picture likely changed" and wake immediately.
+                    if redis_handler.gate_active(gates[cam.name]):
+                        any_gate_open = True
                     if should_analyze(
                         latest[0].frame_data,
                         state[cam.name]["frame_data"],

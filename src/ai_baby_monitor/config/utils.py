@@ -19,6 +19,10 @@ _CAMERA_KEYS = (
     "motion_threshold",
     "night_saturation_threshold",
     "num_frames_to_process",
+    # HCNetSDK source selection (see stream/hik_sdk.py). All optional.
+    "source",
+    "channel",
+    "sdk_port",
 )
 # Room-level keys. In the new form these live at the top level; in the legacy
 # single-``camera:`` form they were tucked inside the camera block.
@@ -58,6 +62,11 @@ class CameraConfig:
     night_saturation_threshold: float | None = None
     # Per-camera override; None falls back to the room-level default.
     num_frames_to_process: int | None = None
+    # Frame source: "auto" | "rtsp" | "hik-sdk" (None -> the global CAMERA_SOURCE).
+    source: str | None = None
+    # HCNetSDK device channel and private-protocol port.
+    channel: int = 1
+    sdk_port: int = 8000
 
     def __str__(self):
         return self.name or "default"

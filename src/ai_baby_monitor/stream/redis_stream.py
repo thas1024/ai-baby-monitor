@@ -139,6 +139,28 @@ class RedisStreamHandler:
         )
         return entry_id
 
+    # --- camera-side event gate + events stream (see stream/hik_sdk.py) ---
+
+    def set_gate(self, key: str, ttl_seconds: int = 5) -> None:
+        """Arm a short-lived gate so the watcher analyzes on the next cycle."""
+        self.redis_client.set(key, "1", ex=ttl_seconds)
+
+    def gate_active(self, key: str) -> bool:
+        """Whether a camera-side event gate is currently armed."""
+        return bool(self.redis_client.exists(key))
+
+    def add_event(self, key: str, event: dict, maxlen: int = 256) -> str:
+        """Append a camera-side event to the events stream."""
+        return self.redis_client.xadd(name=key, fields=event, maxlen=maxlen)
+
+    def drain_ptz(self, key: str, count: int = 10) -> list[dict]:
+        """Read and consume pending PTZ commands (oldest first)."""
+        entries = self.redis_client.xrange(name=key, min="-", max="+", count=count)
+        commands = [self.deserialize_log(data) for _id, data in entries]
+        if entries:
+            self.redis_client.xtrim(name=key, maxlen=0)
+        return commands
+
     def get_latest_entries(
         self, key: str, count: int = 1, last_id: str | None = None
     ) -> list[tuple[bytes, dict]]:

@@ -222,6 +222,11 @@ class CameraStream:
         save_stream_path: str | None = None,
         frame_shape: tuple[int, int] | None = None,
         decode: str = "auto",
+        source: str = "auto",
+        channel: int = 1,
+        sdk_port: int = 8000,
+        sdk_user: str | None = None,
+        sdk_password: str | None = None,
     ):
         """
         Simple camera stream handler.
@@ -230,18 +235,76 @@ class CameraStream:
             uri: Camera URI or device index.
             save_stream_path: Path to save the stream.
             frame_shape: Frame shape (width, height) to capture/resize to.
-            decode: Frame decoding backend. "cpu" uses OpenCV decode; "qsv" /
+            decode: RTSP frame decoding backend. "cpu" uses OpenCV decode; "qsv" /
                 "vaapi" decode on an Intel GPU via ffmpeg; "auto" prefers Intel
-                hardware and falls back to CPU.
+                hardware and falls back to CPU. (Only used when frames come from RTSP.)
+            source: Frame source. "hik-sdk" pulls frames from the HCNetSDK device
+                session; "rtsp" forces RTSP; "auto" tries the SDK and falls back to
+                RTSP if the SDK is unavailable, login fails, or no frame arrives.
+            channel: Device channel for the SDK session (usually 1).
+            sdk_port: HCNetSDK private protocol port (default 8000).
+            sdk_user / sdk_password: SDK login credentials; default to those parsed
+                from ``uri`` (``rtsp://user:pass@host``).
         """
         self.frame_shape = frame_shape
         self.frame_idx = 0
         self.uri = uri
         self._ffmpeg_bin = os.getenv("FFMPEG_BIN", "ffmpeg")
         self._decoder: _FfmpegDecoder | None = None
-        self.decode = self._init_decode(decode)
-        self.capture = self._init_capture(uri) if self.decode == "cpu" else None
+        self._hik_session = None
+        self._hik_frames = None
+        self.channel = channel
+        self.sdk_port = sdk_port
+        self.sdk_user = sdk_user
+        self.sdk_password = sdk_password
+        self.source = self._init_source(source)
+        self.decode = (
+            self._init_decode(decode) if self.source == "rtsp" else "cpu"
+        )
+        self.capture = (
+            self._init_capture(uri) if self.decode == "cpu" and self.source == "rtsp" else None
+        )
         self.stream_writer = self._init_stream_writer(save_stream_path)
+
+    def _init_source(self, source: str) -> str:
+        """Resolve the frame source, degrading to RTSP on any SDK failure."""
+        if source not in ("auto", "rtsp", "hik-sdk"):
+            logger.warning("Unknown CAMERA_SOURCE, using auto", source=source)
+            source = "auto"
+        if source == "rtsp" or not isinstance(self.uri, str) or self.uri.isdigit():
+            return "rtsp"
+
+        try:
+            from ai_baby_monitor.stream import hik_sdk
+        except Exception as e:
+            logger.warning("HCNetSDK module unavailable; using RTSP", error=str(e))
+            return "rtsp"
+
+        parsed = hik_sdk.parse_rtsp_uri(self.uri)
+        if parsed is None:
+            return "rtsp"
+
+        user = self.sdk_user or parsed["user"]
+        password = self.sdk_password or parsed["password"]
+        session = hik_sdk.HikSession(
+            host=parsed["host"], user=user, password=password,
+            port=self.sdk_port, channel=self.channel,
+        )
+        if not session.login():
+            logger.warning("SDK login failed; falling back to RTSP frames")
+            return "rtsp"
+
+        frames = hik_sdk.HikFrameSource(session, stream_type=1)
+        if frames.start():
+            self._hik_session = session
+            self._hik_frames = frames
+            logger.info("Using HCNetSDK frame source", host=parsed["host"], serial=session.serial())
+            return "hik-sdk"
+
+        logger.warning("SDK frame source failed; falling back to RTSP frames")
+        frames.stop()
+        session.logout()
+        return "rtsp"
 
     def _init_decode(self, decode: str) -> str:
         # ffmpeg hwaccel only makes sense for a stream URL, not a webcam index.
@@ -305,6 +368,8 @@ class CameraStream:
 
     def _grab_raw_frame(self) -> np.ndarray | None:
         """Get the next available frame as a BGR array (no JPEG encoding yet)."""
+        if self._hik_frames is not None:
+            return self._hik_frames.next_frame(timeout=5.0)
         if self._decoder is not None:
             return self._decoder.next_frame(timeout=5.0)
         if not self.capture.grab():
@@ -347,7 +412,11 @@ class CameraStream:
         return frame_obj
 
     def close(self):
-        """Close the camera capture, decoder and stream writer."""
+        """Close the camera capture, decoders, SDK session and stream writer."""
+        if self._hik_frames is not None:
+            self._hik_frames.stop()
+        if self._hik_session is not None:
+            self._hik_session.logout()
         if self._decoder is not None:
             self._decoder.stop()
         if self.capture is not None:

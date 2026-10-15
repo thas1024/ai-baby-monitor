@@ -21,6 +21,11 @@ dependencies = [
     "structlog>=25.2.0",
 ]
 
+[project.optional-dependencies]
+# Hikvision/EZVIZ device-network SDK (HCNetSDK). x86_64/Windows only, so it's an
+# extra: install with `uv sync --extra hik`. Enables the SDK frame source + events.
+hik = ["HCNetSDK-python==1.0.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
