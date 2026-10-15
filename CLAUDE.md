@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A baby monitor. A camera stream is pushed to Redis, a vision LLM checks the frames against natural-language rules from YAML config, and a single beep fires (`should_alert`) if a rule is violated. A Streamlit dashboard shows the live frame plus the LLM reasoning logs.
 
+Open work and known follow-ups live in `TODO.md`.
+
 The vision backend is any **OpenAI-compatible endpoint** (cloud or custom), selected via `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_NAME` / `LLM_API_MODE` in `.env`. A local vLLM (Qwen2.5-VL) service is kept as an optional compose profile for offline/self-hosted use, but is **not** started by default.
 
 Redis runs as a compose service (`redis:7-alpine`, host port **16379** → 6379, persisted in the `redis-data` volume). Bridge services reach it as `redis:6379`; the host-networked watcher reaches it as `127.0.0.1:16379` (set in its service `environment`). Point `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` elsewhere if you'd rather use an external Redis.
